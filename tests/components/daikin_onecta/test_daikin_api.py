@@ -3,7 +3,13 @@
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from daikin_onecta import OnectaApiError, OnectaConnectionError, OnectaRateLimitError
+from daikin_onecta import (
+    OnectaApiError,
+    OnectaAuthenticationError,
+    OnectaConnectionError,
+    OnectaRateLimitError,
+    Site,
+)
 from daikin_onecta.rate_limit import RateLimit
 import pytest
 
@@ -65,6 +71,16 @@ async def test_get_device_details_rate_limit(
         await api.get_cloud_device_details()
 
 
+async def test_get_sites(hass: HomeAssistant, config_entry: MockConfigEntry) -> None:
+    """Fetch sites without using the normal polling endpoint."""
+    api = DaikinApi(hass, config_entry, MagicMock())
+    sites = [Site(id="site-1", gateway_device_ids=["gateway-1"])]
+    api.client.get_sites = AsyncMock(return_value=sites)
+
+    assert await api.get_sites() == sites
+    api.client.get_sites.assert_awaited_once_with()
+
+
 async def test_get_device_details_respects_cooldown(
     hass: HomeAssistant,
     config_entry: MockConfigEntry,
@@ -106,6 +122,29 @@ async def test_write_success(
     assert await api.async_execute_command(command)
     command.assert_awaited_once_with(api.client)
     assert api.last_patch_call is not None
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_write_authentication_error(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    status: int,
+) -> None:
+    """Start reauthentication and use the platform's translated write failure."""
+    api = DaikinApi(hass, config_entry, MagicMock())
+    command = AsyncMock(
+        side_effect=OnectaAuthenticationError(
+            status=status,
+            method="PATCH",
+            path="/v1/management-points/point",
+        )
+    )
+
+    with patch.object(config_entry, "async_start_reauth") as start_reauth:
+        assert not await api.async_execute_command(command)
+
+    start_reauth.assert_called_once_with(hass)
+    assert api.last_patch_call is None
 
 
 async def test_write_api_error(

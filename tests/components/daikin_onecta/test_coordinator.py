@@ -1,12 +1,19 @@
 """Test the Daikin Onecta coordinator."""
 
+from copy import deepcopy
 from datetime import UTC, datetime, time, timedelta
 from math import ceil
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
-from daikin_onecta import OnectaApiError, OnectaConnectionError, OnectaRateLimitError
+from daikin_onecta import (
+    OnectaApiError,
+    OnectaAuthenticationError,
+    OnectaConnectionError,
+    OnectaRateLimitError,
+)
+from daikin_onecta.models import Characteristic
 from daikin_onecta.rate_limit import RateLimit
 import pytest
 
@@ -21,7 +28,10 @@ from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
     OAuth2TokenRequestReauthError,
 )
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.update_coordinator import UpdateFailed
+
+from .test_climate_snapshots import _load_gateway_devices
 
 from tests.common import MockConfigEntry
 
@@ -29,7 +39,7 @@ EXPECTED_RATE_LIMIT_RETRY_AFTER = 3060
 EXPECTED_CONNECTION_ERROR = "network unavailable"
 
 
-def test_device_update_refreshes_cached_name() -> None:
+def test_device_update_detects_registry_metadata_changes() -> None:
     """Use the replacement cloud model's name in device-registry metadata."""
     device = DaikinOnectaDevice(
         SimpleNamespace(
@@ -42,7 +52,7 @@ def test_device_update_refreshes_cached_name() -> None:
         )
     )
 
-    device.set_device_data(
+    assert device.set_device_data(
         SimpleNamespace(
             id="gateway",
             display_name="New name",
@@ -54,6 +64,101 @@ def test_device_update_refreshes_cached_name() -> None:
     )
 
     assert device.name == "New name"
+
+
+def test_device_update_ignores_unchanged_registry_metadata() -> None:
+    """Avoid rewriting a device registry entry for unchanged cloud metadata."""
+    device = DaikinOnectaDevice(
+        SimpleNamespace(
+            id="gateway",
+            display_name="Name",
+            available=True,
+            mac_address=None,
+            device_model="Model",
+            gateway_embedded_id=None,
+        )
+    )
+
+    assert not device.set_device_data(
+        SimpleNamespace(
+            id="gateway",
+            display_name="Name",
+            available=True,
+            mac_address=None,
+            device_model="Model",
+            gateway_embedded_id=None,
+        )
+    )
+
+
+async def test_device_registry_refreshes_without_climate_entity(
+    hass: HomeAssistant,
+    device_registry: dr.DeviceRegistry,
+    config_entry: MockConfigEntry,
+) -> None:
+    """Refresh a gateway registry entry even when it has no climate entity."""
+    gateway = DaikinOnectaDevice(
+        SimpleNamespace(
+            id="gateway",
+            display_name="Old name",
+            available=True,
+            mac_address=None,
+            device_model="Old model",
+            gateway_embedded_id=None,
+        )
+    )
+    gateway.async_update_device_registry(hass, config_entry)
+    gateway.set_device_data(
+        SimpleNamespace(
+            id="gateway",
+            display_name="New name",
+            available=True,
+            mac_address=None,
+            device_model="New model",
+            gateway_embedded_id=None,
+        )
+    )
+    gateway.async_update_device_registry(hass, config_entry)
+
+    entry = device_registry.async_get_device_by_identifier(
+        (DOMAIN, "gateway"), config_entry.entry_id
+    )
+    assert entry is not None
+    assert entry.name == "New name"
+    assert entry.model_id == "New model"
+
+
+@pytest.mark.parametrize(
+    ("mac_address", "expected_connections"),
+    [
+        ("02:00:00:00:00:01", {(dr.CONNECTION_NETWORK_MAC, "02:00:00:00:00:01")}),
+        (None, set()),
+    ],
+)
+async def test_device_registry_updates_changed_mac_address(
+    hass: HomeAssistant,
+    device_registry: dr.DeviceRegistry,
+    config_entry: MockConfigEntry,
+    mac_address: str | None,
+    expected_connections: set[tuple[str, str]],
+) -> None:
+    """Detect MAC-only changes and replace, rather than retain, stale connections."""
+    gateway = DaikinOnectaDevice(_load_gateway_devices("ururu")[0])
+    gateway.async_update_device_registry(hass, config_entry)
+    replacement = deepcopy(gateway.device)
+    replacement.gateway_management_point.characteristics["macAddress"] = Characteristic(
+        value=mac_address
+    )
+
+    assert gateway.set_device_data(replacement)
+    gateway.async_update_device_registry(hass, config_entry)
+
+    entry = device_registry.async_get_device_by_identifier(
+        (DOMAIN, gateway.id), config_entry.entry_id
+    )
+    assert entry is not None
+    assert entry.connections == expected_connections
+    assert not gateway.set_device_data(deepcopy(replacement))
 
 
 def _patch_polling_schedule(
@@ -282,7 +387,7 @@ class TestOnectaDataUpdateCoordinator:
             mock_random.randint.assert_called_once_with(594, 1782)
 
     async def test_rate_limit_uses_update_failed_retry_after(
-        self, caplog, coordinator, mock_config_entry
+        self, coordinator, mock_config_entry
     ):
         """A Daikin rate limit should use the coordinator retry-after mechanism."""
         daikin_api = coordinator.api
@@ -303,9 +408,6 @@ class TestOnectaDataUpdateCoordinator:
         assert exc_info.value.retry_after == EXPECTED_RATE_LIMIT_RETRY_AFTER
         assert exc_info.value.translation_key == "rate_limit_exceeded"
         assert coordinator.update_interval == initial_interval
-        assert (
-            "Daikin API rate limit reached; retrying after 3060 seconds" in caplog.text
-        )
 
     async def test_api_error_uses_update_failed_with_http_status(self, coordinator):
         """Turn a Daikin HTTP error into a translatable polling failure."""
@@ -325,13 +427,15 @@ class TestOnectaDataUpdateCoordinator:
         assert exc_info.value.translation_key == "api_error"
         assert exc_info.value.translation_placeholders == {"status": "500"}
 
-    async def test_unauthorized_api_error_requires_authentication(self, coordinator):
+    @pytest.mark.parametrize("status", [401, 403])
+    async def test_unauthorized_api_error_requires_authentication(
+        self, coordinator: OnectaDataUpdateCoordinator, status: int
+    ) -> None:
         """A rejected cloud token must not become a polling retry."""
         coordinator.api.last_patch_call = None
         coordinator.api.get_cloud_device_details = AsyncMock(
-            side_effect=OnectaApiError(
-                401,
-                "Unauthorized",
+            side_effect=OnectaAuthenticationError(
+                status=status,
                 method="GET",
                 path="/v1/gateway-devices",
             )
@@ -435,6 +539,7 @@ class TestOnectaDataUpdateCoordinator:
     async def test_missing_cloud_device_is_marked_unavailable(self, coordinator):
         """Mark cached gateways unavailable when the cloud no longer returns them."""
         missing_device = MagicMock()
+        missing_device.device = MagicMock(id="missing", management_points=[])
         coordinator.data = {"missing": missing_device}
         coordinator.api.last_patch_call = None
         coordinator.api.get_cloud_device_details = AsyncMock(return_value=[])
@@ -442,10 +547,93 @@ class TestOnectaDataUpdateCoordinator:
         await coordinator._async_update_data_from_cloud()
 
         missing_device.mark_unavailable.assert_called_once_with()
+        coordinator.hass.config_entries.async_schedule_reload.assert_not_called()
+
+    async def test_new_cloud_gateway_schedules_reload(self, coordinator):
+        """Reload platforms when ONECTA reports a newly added gateway."""
+        existing_device = MagicMock()
+        existing_device.device = MagicMock(id="existing", management_points=[])
+        existing_device.set_device_data.return_value = False
+        new_device = MagicMock(
+            id="new",
+            display_name="New device",
+            available=True,
+            device_model="BRP069",
+            gateway_embedded_id=None,
+            mac_address=None,
+            management_points=[],
+        )
+        coordinator.data = {"existing": existing_device}
+        coordinator.api.last_patch_call = None
+        coordinator.api.get_cloud_device_details = AsyncMock(
+            return_value=[existing_device.device, new_device]
+        )
+
+        with patch.object(DaikinOnectaDevice, "async_update_device_registry"):
+            await coordinator._async_update_data_from_cloud()
+
+        coordinator.hass.config_entries.async_schedule_reload.assert_called_once_with(
+            coordinator.config_entry.entry_id
+        )
+
+    async def test_new_management_point_schedules_reload(self, coordinator):
+        """Reload platforms when ONECTA adds a management point."""
+        existing_device = MagicMock()
+        existing_device.device = MagicMock(
+            id="gateway",
+            management_points=[
+                MagicMock(
+                    embedded_id="climate",
+                    management_point_type="climateControl",
+                )
+            ],
+        )
+        existing_device.set_device_data.return_value = False
+        updated_device = MagicMock(
+            id="gateway",
+            management_points=[
+                MagicMock(
+                    embedded_id="climate",
+                    management_point_type="climateControl",
+                ),
+                MagicMock(
+                    embedded_id="hot_water",
+                    management_point_type="domesticHotWaterTank",
+                ),
+            ],
+        )
+        coordinator.data = {"gateway": existing_device}
+        coordinator.api.last_patch_call = None
+        coordinator.api.get_cloud_device_details = AsyncMock(
+            return_value=[updated_device]
+        )
+
+        await coordinator._async_update_data_from_cloud()
+
+        coordinator.hass.config_entries.async_schedule_reload.assert_called_once_with(
+            coordinator.config_entry.entry_id
+        )
+
+    async def test_unchanged_cloud_topology_does_not_schedule_reload(self, coordinator):
+        """Do not reload platforms for ordinary state updates."""
+        existing_device = MagicMock()
+        cloud_device = MagicMock(id="gateway", management_points=[])
+        existing_device.device = cloud_device
+        existing_device.set_device_data.return_value = False
+        coordinator.data = {"gateway": existing_device}
+        coordinator.api.last_patch_call = None
+        coordinator.api.get_cloud_device_details = AsyncMock(
+            return_value=[cloud_device]
+        )
+
+        await coordinator._async_update_data_from_cloud()
+
+        coordinator.hass.config_entries.async_schedule_reload.assert_not_called()
 
     async def test_updated_cloud_device_replaces_cached_model(self, coordinator):
         """Replace the cached gateway model with cloud data."""
         existing_device = MagicMock()
+        existing_device.set_device_data.return_value = False
         cloud_device = MagicMock(id="gateway")
         coordinator.data = {"gateway": existing_device}
         coordinator.api.last_patch_call = None
@@ -456,3 +644,23 @@ class TestOnectaDataUpdateCoordinator:
         await coordinator._async_update_data_from_cloud()
 
         existing_device.set_device_data.assert_called_once_with(cloud_device)
+        existing_device.async_update_device_registry.assert_not_called()
+
+    async def test_changed_gateway_metadata_refreshes_device_registry(
+        self, coordinator
+    ):
+        """Refresh the registry when a cloud-model replacement changes metadata."""
+        existing_device = MagicMock()
+        existing_device.set_device_data.return_value = True
+        cloud_device = MagicMock(id="gateway")
+        coordinator.data = {"gateway": existing_device}
+        coordinator.api.last_patch_call = None
+        coordinator.api.get_cloud_device_details = AsyncMock(
+            return_value=[cloud_device]
+        )
+
+        await coordinator._async_update_data_from_cloud()
+
+        existing_device.async_update_device_registry.assert_called_once_with(
+            coordinator.hass, coordinator.config_entry
+        )

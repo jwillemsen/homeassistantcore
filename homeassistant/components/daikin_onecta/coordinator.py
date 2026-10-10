@@ -1,5 +1,6 @@
 """Coordinator for Daikin Onecta integration."""
 
+from collections.abc import Iterable
 from datetime import datetime, time, timedelta, tzinfo
 import logging
 from math import ceil
@@ -8,9 +9,11 @@ from typing import override
 
 from daikin_onecta.exceptions import (
     OnectaApiError,
+    OnectaAuthenticationError,
     OnectaConnectionError,
     OnectaRateLimitError,
 )
+from daikin_onecta.models import GatewayDevice
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -21,6 +24,7 @@ from homeassistant.util import dt as dt_util
 from .const import DOMAIN
 from .daikin_api import DaikinApi
 from .device import DaikinOnectaDevice
+from .discovery import gateway_entity_keys
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,6 +53,8 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
     ) -> None:
         """Initialize."""
         self._daikin_api = daikin_api
+        self._cloud_update_sequence = 0
+        self._reload_pending = False
 
         super().__init__(
             hass,
@@ -58,30 +64,26 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
             update_interval=self._determine_update_interval(),
         )
 
-        _LOGGER.info(
-            "Daikin coordinator initialized with %s interval",
-            self.update_interval,
-        )
-
     @property
     def api(self) -> DaikinApi:
         """Return the Daikin API client."""
         return self._daikin_api
 
+    @property
+    def cloud_update_sequence(self) -> int:
+        """Identify fresh cloud responses separately from local write notifications."""
+        return self._cloud_update_sequence
+
     async def _async_update_data_from_cloud(self) -> dict[str, DaikinOnectaDevice]:
         """Fetch the latest device state from Daikin."""
-        _LOGGER.debug("Daikin coordinator start _async_update_data")
-
-        devices = self.data or {}
+        previous_devices = self.data
+        devices = previous_devices or {}
         if (
             self.api.last_patch_call is not None
             and (dt_util.utcnow() - self.api.last_patch_call).total_seconds()
             < _POST_WRITE_COOLDOWN.total_seconds()
         ):
             self.update_interval = _POST_WRITE_COOLDOWN
-            _LOGGER.debug(
-                "API UPDATE skipped (just updated from UI)",
-            )
         else:
             # Restore the normal polling interval before fetching. If the
             # request fails, retries must not remain at the cooldown cadence.
@@ -95,10 +97,6 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
                 # authentication failures rather than retrying the coordinator.
                 raise
             except OnectaRateLimitError as err:
-                _LOGGER.warning(
-                    "Daikin API rate limit reached; retrying after %s seconds",
-                    err.retry_after,
-                )
                 raise UpdateFailed(
                     translation_domain=DOMAIN,
                     translation_key="rate_limit_exceeded",
@@ -109,12 +107,12 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
                     translation_domain=DOMAIN,
                     translation_key="connection_failed",
                 ) from err
+            except OnectaAuthenticationError as err:
+                raise ConfigEntryAuthFailed(
+                    translation_domain=DOMAIN,
+                    translation_key="authentication_failed",
+                ) from err
             except OnectaApiError as err:
-                if err.status == 401:
-                    raise ConfigEntryAuthFailed(
-                        translation_domain=DOMAIN,
-                        translation_key="authentication_failed",
-                    ) from err
                 raise UpdateFailed(
                     translation_domain=DOMAIN,
                     translation_key="api_error",
@@ -123,8 +121,14 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
 
             if cloud_devices is None:
                 self.update_interval = _POST_WRITE_COOLDOWN
-                _LOGGER.debug("API UPDATE skipped (just updated from UI)")
             else:
+                self._cloud_update_sequence += 1
+                has_new_topology = previous_devices is not None and bool(
+                    self._topology(cloud_devices)
+                    - self._topology(
+                        device.device for device in previous_devices.values()
+                    )
+                )
                 cloud_device_ids = {device.id for device in cloud_devices}
                 for device_id, device in devices.items():
                     if device_id not in cloud_device_ids:
@@ -133,23 +137,46 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
                 for dev_data in cloud_devices:
                     if dev_data.id in devices:
                         device = devices[dev_data.id]
-                        device.set_device_data(dev_data)
+                        registry_metadata_changed = device.set_device_data(dev_data)
                     else:
                         device = DaikinOnectaDevice(dev_data)
                         devices[dev_data.id] = device
+                        registry_metadata_changed = True
+                    if registry_metadata_changed:
+                        device.async_update_device_registry(
+                            self.hass, self.config_entry
+                        )
+
+                if has_new_topology and not self._reload_pending:
+                    # Platform setup is capability-driven. Reload only when the
+                    # cloud reports newly supported entities, including new
+                    # capabilities of existing management points.
+                    # Missing topology remains in the registry and is handled
+                    # by the availability checks above.
+                    self._reload_pending = True
+                    self.hass.config_entries.async_schedule_reload(
+                        self.config_entry.entry_id
+                    )
 
                 self.update_interval = self._determine_update_interval()
 
-        _LOGGER.debug(
-            "Daikin coordinator finished _async_update_data, next interval %s",
-            self.update_interval,
-        )
         return devices
 
     @override
     async def _async_update_data(self) -> dict[str, DaikinOnectaDevice]:
         """Fetch data for the Home Assistant coordinator interface."""
         return await self._async_update_data_from_cloud()
+
+    @staticmethod
+    def _topology(
+        devices: Iterable[GatewayDevice],
+    ) -> set[tuple[str, str | None, str]]:
+        """Return supported entity identities, independent of their current values."""
+        return {
+            entity_key
+            for device in devices
+            for entity_key in gateway_entity_keys(device)
+        }
 
     def _determine_update_interval(self) -> timedelta:
         """Determine the next polling interval."""
@@ -257,13 +284,6 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
             high_interval += 1
             low_interval = max(minimum_interval, ceil(high_interval * interval_ratio))
 
-        _LOGGER.debug(
-            "Daikin polling uses %s of %s daily calls: %s daytime, %s overnight",
-            daily_budget,
-            daily_limit,
-            timedelta(seconds=high_interval),
-            timedelta(seconds=low_interval),
-        )
         return timedelta(seconds=high_interval), timedelta(seconds=low_interval)
 
     @staticmethod

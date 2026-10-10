@@ -9,10 +9,11 @@ from typing import cast
 from daikin_onecta.client import OnectaClient
 from daikin_onecta.exceptions import (
     OnectaApiError,
+    OnectaAuthenticationError,
     OnectaConnectionError,
     OnectaRateLimitError,
 )
-from daikin_onecta.models import GatewayDevice
+from daikin_onecta.models import GatewayDevice, Site
 
 from homeassistant import config_entries, core
 from homeassistant.helpers import config_entry_oauth2_flow
@@ -20,6 +21,14 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def gateway_site_membership(sites: list[Site], gateway_device_id: str) -> bool | None:
+    """Return membership without assuming an incomplete site response is empty."""
+    membership = [site.has_gateway_device(gateway_device_id) for site in sites]
+    if True in membership:
+        return True
+    return None if None in membership else False
 
 
 class DaikinApi:
@@ -91,6 +100,11 @@ class DaikinApi:
                 return None
             return await self._client.get_gateway_devices()
 
+    async def get_sites(self) -> list[Site]:
+        """Return account sites for explicit, non-polling diagnostics."""
+        async with self._cloud_lock:
+            return await self._client.get_sites()
+
     async def async_execute_command(
         self, command: Callable[[OnectaClient], Awaitable[None]]
     ) -> bool:
@@ -98,6 +112,9 @@ class DaikinApi:
         async with self._cloud_lock:
             try:
                 await command(self._client)
+            except OnectaAuthenticationError:
+                self._config_entry.async_start_reauth(self.hass)
+                return False
             except OnectaRateLimitError as err:
                 _LOGGER.warning(
                     "Daikin request %s %s was rate limited; retry after %s seconds",
