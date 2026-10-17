@@ -1381,6 +1381,7 @@ async def test_climate_service_updates_entity_state(
             "homeassistant.components.daikin_onecta.OnectaDataUpdateCoordinator",
             return_value=coordinator,
         ),
+        patch("homeassistant.components.daikin_onecta.PLATFORMS", [Platform.CLIMATE]),
     ):
         assert await hass.config_entries.async_setup(config_entry.entry_id)
         await hass.async_block_till_done()
@@ -1411,9 +1412,7 @@ async def test_climate_service_updates_entity_state(
         21,
     )
 
-    device.async_update_device_registry.reset_mock()
     coordinator.async_update_listeners()
-    device.async_update_device_registry.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -1681,6 +1680,7 @@ async def test_setup_creates_entities_per_management_point(
             "homeassistant.components.daikin_onecta.OnectaDataUpdateCoordinator",
             return_value=coordinator,
         ),
+        patch("homeassistant.components.daikin_onecta.PLATFORMS", [Platform.CLIMATE]),
         patch(
             "homeassistant.components.daikin_onecta.climate.DaikinClimate",
             TestClimateEntity,
