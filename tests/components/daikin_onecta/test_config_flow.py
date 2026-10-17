@@ -204,14 +204,7 @@ async def test_reauth_confirm_form(
     """Show the reauthentication confirmation form."""
     config_entry.add_to_hass(hass)
 
-    result = await hass.config_entries.flow.async_init(
-        DOMAIN,
-        context={
-            "source": config_entries.SOURCE_REAUTH,
-            "entry_id": config_entry.entry_id,
-        },
-        data=config_entry.data,
-    )
+    result = await config_entry.start_reauth_flow(hass)
 
     assert result["type"] == "form"
     assert result["step_id"] == "reauth_confirm"
