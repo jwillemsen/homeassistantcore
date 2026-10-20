@@ -6,6 +6,7 @@ from aiohttp import ClientError
 from daikin_onecta import OnectaConnectionError, Site
 from freezegun.api import FrozenDateTimeFactory
 import pytest
+from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 
 from homeassistant.components.daikin_onecta import async_remove_config_entry_device
 from homeassistant.components.daikin_onecta.const import DOMAIN
@@ -13,8 +14,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 
 from .test_climate_snapshots import _async_setup_fixture
-
-from tests.common import MockConfigEntry, async_fire_time_changed
 
 
 @pytest.fixture

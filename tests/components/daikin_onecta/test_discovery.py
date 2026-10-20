@@ -12,6 +12,7 @@ from daikin_onecta.models import (
 )
 from freezegun.api import FrozenDateTimeFactory
 import pytest
+from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 
 from homeassistant.components.daikin_onecta import OnectaDataUpdateCoordinator
 from homeassistant.components.daikin_onecta.const import DOMAIN
@@ -28,8 +29,6 @@ from homeassistant.helpers import entity_registry as er
 
 from .conftest import FAKE_ACCESS_TOKEN
 from .test_climate_snapshots import _async_setup_fixture, _load_gateway_devices
-
-from tests.common import MockConfigEntry, async_fire_time_changed
 
 
 async def _async_fire_coordinator_update(

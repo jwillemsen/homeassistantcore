@@ -12,6 +12,7 @@ from daikin_onecta.exceptions import OnectaConnectionError
 from daikin_onecta.models import Characteristic, GatewayDevice
 from freezegun.api import FrozenDateTimeFactory
 import pytest
+from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 
 from homeassistant.components.button import DOMAIN as BUTTON_DOMAIN, SERVICE_PRESS
 from homeassistant.components.climate import (
@@ -95,8 +96,6 @@ from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
 
 from .test_climate_snapshots import _async_setup_fixture, _load_gateway_devices
-
-from tests.common import MockConfigEntry, async_fire_time_changed
 
 
 async def _async_fire_coordinator_update(
