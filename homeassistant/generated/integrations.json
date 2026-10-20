@@ -2008,6 +2008,7 @@
       "name": "Daikin Onecta",
       "integration_type": "hub",
       "categories": [
+        "climate.air_purifiers_humidifiers",
         "climate.heat_pumps_air_conditioning",
         "climate.water_heaters"
       ],
