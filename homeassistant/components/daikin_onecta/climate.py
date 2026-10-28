@@ -34,7 +34,7 @@ from homeassistant.util import dt as dt_util
 from .const import FANMODE_FIXED
 from .coordinator import DaikinOnectaConfigEntry, OnectaDataUpdateCoordinator
 from .device import DaikinOnectaDevice
-from .entity import DaikinOnectaEntity
+from .entity import DaikinManagementPointEntity
 
 PARALLEL_UPDATES = 1
 
@@ -128,7 +128,7 @@ def _create_climate_entities(
     return entities
 
 
-class DaikinClimate(DaikinOnectaEntity, ClimateEntity):
+class DaikinClimate(DaikinManagementPointEntity, ClimateEntity):
     """Representation of one Daikin temperature target in a climate zone."""
 
     _attr_has_entity_name = True
@@ -146,8 +146,7 @@ class DaikinClimate(DaikinOnectaEntity, ClimateEntity):
         description: ClimateEntityDescription,
     ) -> None:
         """Initialize the climate device."""
-        super().__init__(coordinator, device)
-        self._embedded_id = embedded_id
+        super().__init__(device, coordinator, embedded_id)
         self._setpoint = setpoint
         self._attr_unique_id = f"{self._device.id}_{self._embedded_id}_{self._setpoint}"
         self.entity_description = description

@@ -14,6 +14,7 @@ class DaikinOnectaDevice:
         self._is_present_in_cloud = True
         self.id: str = device.id
         self.name: str = device.display_name
+        self.ha_device_id: str | None = None
 
     @property
     def present_in_cloud(self) -> bool:

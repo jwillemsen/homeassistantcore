@@ -6,9 +6,9 @@ from typing import Never, override
 from daikin_onecta.client import OnectaClient
 
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
-from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import (
     CONNECTION_NETWORK_MAC,
+    ChildDeviceInfo,
     DeviceEntryType,
     DeviceInfo,
 )
@@ -63,7 +63,7 @@ class DaikinOnectaEntity(CoordinatorEntity[OnectaDataUpdateCoordinator]):
 
     @property
     @override
-    def device_info(self) -> DeviceInfo:
+    def device_info(self) -> DeviceInfo | ChildDeviceInfo:
         """Return the gateway device registry information."""
         gateway = self._device.device
         connections = set()
@@ -151,33 +151,25 @@ class DaikinManagementPointEntity(DaikinEntity):
     ) -> None:
         """Initialize a management-point entity."""
         super().__init__(device, coordinator, embedded_id)
+        point = device.management_point(embedded_id)
+        self._management_point_type = (
+            point.management_point_type if point is not None else None
+        )
 
     @property
     @override
-    def device_info(self) -> DeviceInfo:
-        """Return a physical management point as a gateway subdevice."""
-        point = self._device.management_point(self._embedded_id)
-        if (
-            point is None
-            or point.management_point_type not in MANAGEMENT_POINT_DEVICE_NAMES
-        ):
+    def device_info(self) -> DeviceInfo | ChildDeviceInfo:
+        """Return a physical management point as a gateway child device."""
+        if self._management_point_type is None:
             return super().device_info
+        assert self._device.ha_device_id is not None
 
-        info = DeviceInfo(
-            identifiers={(DOMAIN, f"{self._device.id}_{self._embedded_id}")},
-            manufacturer="Daikin",
-            model=point.model,
-            name=(
-                f"{self._device.name} "
-                f"{MANAGEMENT_POINT_DEVICE_NAMES[point.management_point_type]}"
+        management_point_type = self._management_point_type
+        return ChildDeviceInfo(
+            identifiers={(DOMAIN, f"{self._device.id}{self._embedded_id}")},
+            name=MANAGEMENT_POINT_DEVICE_NAMES.get(
+                management_point_type,
+                management_point_type[0].upper() + management_point_type[1:],
             ),
-            serial_number=point.serial,
-            sw_version=point.version,
+            parent_device_id=self._device.ha_device_id,
         )
-        if gateway_device_id := dr.async_get_device_id_by_identifier(
-            self.coordinator.hass,
-            (DOMAIN, self._device.id),
-            config_entry_id=self.coordinator.config_entry.entry_id,
-        ):
-            info["via_device_id"] = gateway_device_id
-        return info

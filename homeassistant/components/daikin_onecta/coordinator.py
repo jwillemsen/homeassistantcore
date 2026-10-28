@@ -32,7 +32,7 @@ from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, MANAGEMENT_POINT_DEVICE_NAMES
+from .const import DOMAIN
 from .device import DaikinOnectaDevice
 from .discovery import gateway_entity_keys
 
@@ -242,22 +242,7 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
             serial_number=serial_number,
             sw_version=sw_version,
         )
-        for point in getattr(gateway, "management_points", []):
-            if point.management_point_type not in MANAGEMENT_POINT_DEVICE_NAMES:
-                continue
-            registry.async_get_or_create(
-                config_entry_id=self.config_entry.entry_id,
-                identifiers={(DOMAIN, f"{device.id}_{point.embedded_id}")},
-                manufacturer="Daikin",
-                model=point.model,
-                name=(
-                    f"{device.name} "
-                    f"{MANAGEMENT_POINT_DEVICE_NAMES[point.management_point_type]}"
-                ),
-                serial_number=point.serial,
-                sw_version=point.version,
-                via_device_id=gateway_entry.id,
-            )
+        device.ha_device_id = gateway_entry.id
 
     @property
     def cloud_update_sequence(self) -> int:
