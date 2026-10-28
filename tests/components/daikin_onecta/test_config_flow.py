@@ -4,6 +4,7 @@ from ipaddress import ip_address
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
+from daikin_onecta import OnectaAuthenticationError, OnectaConnectionError
 import pytest
 from pytest_homeassistant.common import MockConfigEntry
 from pytest_homeassistant.test_util.aiohttp import AiohttpClientMocker
@@ -14,6 +15,7 @@ from homeassistant.components.application_credentials import (
     ClientCredential,
     async_import_client_credential,
 )
+from homeassistant.components.daikin_onecta.config_flow import FlowHandler
 from homeassistant.components.daikin_onecta.const import (
     DOMAIN,
     OAUTH2_AUTHORIZE,
@@ -30,6 +32,7 @@ from .conftest import FAKE_ACCESS_TOKEN
 TEST_CLIENT_ID = "test-client-id"
 TEST_CLIENT_SECRET = "test-client-secret"
 HTTP_OK = 200
+GATEWAY_DEVICES_URL = "https://api.onecta.daikineurope.com/v1/gateway-devices"
 
 
 def oauth_state(result: dict[str, str]) -> str:
@@ -89,9 +92,10 @@ async def test_full_flow(
             "expires_in": 60,
         },
     )
+    aioclient_mock.get(GATEWAY_DEVICES_URL, json=[])
 
     with patch(
-        "homeassistant.components.daikin_onecta.async_setup_entry", return_value=True
+        "homeassistant.components.daikin_onecta.async_setup_entry", return_value=None
     ) as mock_setup:
         await hass.config_entries.flow.async_configure(result["flow_id"])
 
@@ -166,13 +170,14 @@ async def test_zeroconf_flow_uses_oauth_discovery(
             "expires_in": 60,
         },
     )
+    aioclient_mock.get(GATEWAY_DEVICES_URL, json=[])
 
     await hass.async_block_till_done()
     assert result["type"] == "external"
     assert result["url"].startswith(OAUTH2_AUTHORIZE)
 
     with patch(
-        "homeassistant.components.daikin_onecta.async_setup_entry", return_value=True
+        "homeassistant.components.daikin_onecta.async_setup_entry", return_value=None
     ) as mock_setup:
         await hass.config_entries.flow.async_configure(
             result["flow_id"],
@@ -188,7 +193,7 @@ async def test_invalid_oauth_token(
     hass: HomeAssistant,
 ) -> None:
     """Abort when the OAuth access token is not a valid JWT."""
-    flow = config_entries.HANDLERS[DOMAIN]()
+    flow = FlowHandler()
     flow.hass = hass
 
     result = await flow.async_oauth_create_entry({"token": {"access_token": "invalid"}})
@@ -263,6 +268,41 @@ async def test_reauth_rejects_different_account(
         )
 
     assert err.value.reason == "wrong_account"
+
+
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (
+            OnectaAuthenticationError(401, method="GET", path="/v1/gateway-devices"),
+            "invalid_auth",
+        ),
+        (
+            OnectaConnectionError(
+                "network unavailable", method="GET", path="/v1/gateway-devices"
+            ),
+            "cannot_connect",
+        ),
+    ],
+)
+async def test_oauth_create_entry_validates_gateway_access(
+    hass: HomeAssistant, error: Exception, reason: str
+) -> None:
+    """Abort setup when the gateway API cannot be accessed."""
+    flow = FlowHandler()
+    flow.hass = hass
+    flow.context = {"source": config_entries.SOURCE_USER}
+
+    with patch(
+        "homeassistant.components.daikin_onecta.config_flow.OnectaClient.get_gateway_devices",
+        side_effect=error,
+    ):
+        result = await flow.async_oauth_create_entry(
+            {"token": {"access_token": FAKE_ACCESS_TOKEN}}
+        )
+
+    assert result["type"] == "abort"
+    assert result["reason"] == reason
 
 
 async def test_zeroconf_already_configured(

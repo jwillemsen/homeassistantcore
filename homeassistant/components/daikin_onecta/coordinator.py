@@ -15,6 +15,7 @@ from daikin_onecta.exceptions import (
     OnectaAuthenticationError,
     OnectaConnectionError,
     OnectaRateLimitError,
+    OnectaResponseError,
 )
 from daikin_onecta.models import GatewayDevice
 
@@ -76,6 +77,7 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
             async_get_clientsession(hass), self.async_get_access_token
         )
         self._last_patch_call: datetime | None = None
+        self._polling_backoff_until: datetime | None = None
         self._cloud_lock = asyncio.Lock()
         self._cloud_update_sequence = 0
         self._reload_pending = False
@@ -121,6 +123,8 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
     ) -> list[GatewayDevice] | None:
         """Get typed device data from the Daikin cloud, respecting cooldown."""
         async with self._cloud_lock:
+            if self._polling_backoff_remaining() is not None:
+                return None
             if (
                 cooldown is not None
                 and self._last_patch_call is not None
@@ -133,6 +137,16 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
         """Return account sites for explicit, non-polling diagnostics."""
         async with self._cloud_lock:
             return await self._client.get_sites()
+
+    def _polling_backoff_remaining(self) -> timedelta | None:
+        """Return the remaining polling backoff, if any."""
+        if self._polling_backoff_until is None:
+            return None
+        remaining = self._polling_backoff_until - dt_util.utcnow()
+        if remaining <= timedelta(0):
+            self._polling_backoff_until = None
+            return None
+        return remaining
 
     async def async_execute_command(
         self, command: Callable[[OnectaClient], Awaitable[None]]
@@ -150,6 +164,13 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
                 self.config_entry.async_start_reauth(self.hass)
                 return False
             except OnectaRateLimitError as err:
+                if err.retry_after is not None and err.retry_after > 0:
+                    retry_at = dt_util.utcnow() + timedelta(seconds=err.retry_after)
+                    if (
+                        self._polling_backoff_until is None
+                        or retry_at > self._polling_backoff_until
+                    ):
+                        self._polling_backoff_until = retry_at
                 _LOGGER.debug(
                     "Daikin request %s %s was rate limited; retry after %s seconds",
                     err.method,
@@ -176,7 +197,13 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
             except TimeoutError:
                 _LOGGER.debug("Daikin request timed out")
                 return False
+            had_polling_backoff = self._polling_backoff_remaining() is not None
+            self._polling_backoff_until = None
             self._last_patch_call = dt_util.utcnow()
+            if had_polling_backoff:
+                self.update_interval = _POST_WRITE_COOLDOWN
+                if self._listeners:
+                    self._schedule_refresh()
             return True
 
     def async_register_devices(self) -> None:
@@ -241,6 +268,10 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
         """Fetch the latest device state from Daikin."""
         previous_devices = self.data
         devices = previous_devices or {}
+        if (remaining := self._polling_backoff_remaining()) is not None:
+            self.update_interval = remaining
+            return devices
+
         if (
             self.last_patch_call is not None
             and (dt_util.utcnow() - self.last_patch_call).total_seconds()
@@ -275,6 +306,11 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
                     translation_domain=DOMAIN,
                     translation_key="authentication_failed",
                 ) from err
+            except OnectaResponseError as err:
+                raise UpdateFailed(
+                    translation_domain=DOMAIN,
+                    translation_key="invalid_response",
+                ) from err
             except OnectaApiError as err:
                 raise UpdateFailed(
                     translation_domain=DOMAIN,
@@ -283,7 +319,9 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
                 ) from err
 
             if cloud_devices is None:
-                self.update_interval = _POST_WRITE_COOLDOWN
+                self.update_interval = (
+                    self._polling_backoff_remaining() or _POST_WRITE_COOLDOWN
+                )
             else:
                 self._cloud_update_sequence += 1
                 has_new_topology = previous_devices is not None and bool(
