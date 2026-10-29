@@ -28,14 +28,13 @@ from homeassistant.components.climate import (
 )
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.device_registry import ChildDeviceInfo
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, FANMODE_FIXED
+from .const import FANMODE_FIXED
 from .coordinator import DaikinOnectaConfigEntry, OnectaDataUpdateCoordinator
 from .device import DaikinOnectaDevice
-from .entity import DaikinOnectaEntity
+from .entity import DaikinManagementPointEntity
 
 PARALLEL_UPDATES = 1
 
@@ -129,7 +128,7 @@ def _create_climate_entities(
     return entities
 
 
-class DaikinClimate(DaikinOnectaEntity, ClimateEntity):
+class DaikinClimate(DaikinManagementPointEntity, ClimateEntity):
     """Representation of one Daikin temperature target in a climate zone."""
 
     _attr_has_entity_name = True
@@ -147,26 +146,11 @@ class DaikinClimate(DaikinOnectaEntity, ClimateEntity):
         description: ClimateEntityDescription,
     ) -> None:
         """Initialize the climate device."""
-        super().__init__(coordinator, device)
-        self._embedded_id = embedded_id
+        super().__init__(device, coordinator, embedded_id)
         self._setpoint = setpoint
         self._attr_unique_id = f"{self._device.id}_{self._embedded_id}_{self._setpoint}"
         self.entity_description = description
         self._update_state()
-
-    @property
-    @override
-    def device_info(self) -> ChildDeviceInfo:
-        """Return the climate zone as a child of its gateway."""
-        assert self._device.ha_device_id is not None
-        management_point = self._device.management_point(self._embedded_id)
-        assert management_point is not None
-        management_point_type = management_point.management_point_type
-        return ChildDeviceInfo(
-            identifiers={(DOMAIN, f"{self._device.id}{self._embedded_id}")},
-            name=management_point_type[0].upper() + management_point_type[1:],
-            parent_device_id=self._device.ha_device_id,
-        )
 
     def _update_state(self) -> None:
         """Refresh all state attributes from the device."""

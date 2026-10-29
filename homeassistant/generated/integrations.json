@@ -2065,7 +2065,9 @@
       "name": "Daikin Onecta",
       "integration_type": "hub",
       "categories": [
-        "climate.heat_pumps_air_conditioning"
+        "climate.air_purifiers_humidifiers",
+        "climate.heat_pumps_air_conditioning",
+        "climate.water_heaters"
       ],
       "config_flow": true,
       "iot_class": "cloud_polling"

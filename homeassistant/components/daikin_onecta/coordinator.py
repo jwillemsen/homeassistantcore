@@ -1,13 +1,14 @@
 """Coordinator for Daikin Onecta integration."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import datetime, time, timedelta, tzinfo
 import logging
 from math import ceil
 import random
 from typing import cast, override
 
+from daikin_onecta import Site
 from daikin_onecta.client import OnectaClient
 from daikin_onecta.exceptions import (
     OnectaApiError,
@@ -20,7 +21,11 @@ from daikin_onecta.models import GatewayDevice
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ConfigEntryAuthFailed, OAuth2TokenRequestError
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    OAuth2TokenRequestError,
+    OAuth2TokenRequestReauthError,
+)
 from homeassistant.helpers import config_entry_oauth2_flow, device_registry as dr
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
@@ -29,6 +34,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 from .device import DaikinOnectaDevice
+from .discovery import gateway_entity_keys
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,6 +48,14 @@ _POLLING_BUDGET_FRACTION = 0.55
 _MINIMUM_POLL_INTERVAL = timedelta(minutes=3)
 
 type DaikinOnectaConfigEntry = ConfigEntry[OnectaDataUpdateCoordinator]
+
+
+def gateway_site_membership(sites: list[Site], gateway_device_id: str) -> bool | None:
+    """Return membership without assuming an incomplete site response is empty."""
+    membership = [site.has_gateway_device(gateway_device_id) for site in sites]
+    if True in membership:
+        return True
+    return None if None in membership else False
 
 
 class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDevice]]):
@@ -65,6 +79,8 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
         self._last_patch_call: datetime | None = None
         self._polling_backoff_until: datetime | None = None
         self._cloud_lock = asyncio.Lock()
+        self._cloud_update_sequence = 0
+        self._reload_pending = False
 
         super().__init__(
             hass,
@@ -78,6 +94,19 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
     def client(self) -> OnectaClient:
         """Return the underlying Onecta client."""
         return self._client
+
+    @property
+    def rate_limits(self) -> dict[str, int | None]:
+        """Return rate limits using the existing entity and diagnostics keys."""
+        rate_limit = self._client.rate_limit
+        return {
+            "minute": rate_limit.minute_limit,
+            "day": rate_limit.day_limit,
+            "remaining_minutes": rate_limit.minute_remaining,
+            "remaining_day": rate_limit.day_remaining,
+            "retry_after": rate_limit.retry_after,
+            "ratelimit_reset": rate_limit.reset,
+        }
 
     @property
     def last_patch_call(self) -> datetime | None:
@@ -104,6 +133,11 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
                 return None
             return await self._client.get_gateway_devices()
 
+    async def async_get_sites(self) -> list[Site]:
+        """Return account sites for explicit, non-polling diagnostics."""
+        async with self._cloud_lock:
+            return await self._client.get_sites()
+
     def _polling_backoff_remaining(self) -> timedelta | None:
         """Return the remaining polling backoff, if any."""
         if self._polling_backoff_until is None:
@@ -121,7 +155,13 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
         async with self._cloud_lock:
             try:
                 await command(self._client)
+            except OAuth2TokenRequestReauthError:
+                self.config_entry.async_start_reauth(self.hass)
+                return False
+            except OAuth2TokenRequestError:
+                return False
             except OnectaAuthenticationError:
+                self.config_entry.async_start_reauth(self.hass)
                 return False
             except OnectaRateLimitError as err:
                 if err.retry_after is not None and err.retry_after > 0:
@@ -191,7 +231,7 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
             )
         ) is not None and existing_entry.connections != connections:
             registry.async_update_device(existing_entry.id, new_connections=connections)
-        entry = registry.async_get_or_create(
+        gateway_entry = registry.async_get_or_create(
             config_entry_id=self.config_entry.entry_id,
             identifiers={(DOMAIN, device.id)},
             connections=connections,
@@ -202,12 +242,17 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
             serial_number=serial_number,
             sw_version=sw_version,
         )
-        device.ha_device_id = entry.id
+        device.ha_device_id = gateway_entry.id
+
+    @property
+    def cloud_update_sequence(self) -> int:
+        """Identify fresh cloud responses separately from local write notifications."""
+        return self._cloud_update_sequence
 
     async def _async_update_data_from_cloud(self) -> dict[str, DaikinOnectaDevice]:
         """Fetch the latest device state from Daikin."""
-
-        devices = self.data or {}
+        previous_devices = self.data
+        devices = previous_devices or {}
         if (remaining := self._polling_backoff_remaining()) is not None:
             self.update_interval = remaining
             return devices
@@ -263,6 +308,13 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
                     self._polling_backoff_remaining() or _POST_WRITE_COOLDOWN
                 )
             else:
+                self._cloud_update_sequence += 1
+                has_new_topology = previous_devices is not None and bool(
+                    self._topology(cloud_devices)
+                    - self._topology(
+                        device.device for device in previous_devices.values()
+                    )
+                )
                 cloud_device_ids = {device.id for device in cloud_devices}
                 for device_id, device in devices.items():
                     if device_id not in cloud_device_ids:
@@ -276,8 +328,18 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
                         device = DaikinOnectaDevice(dev_data)
                         devices[dev_data.id] = device
                         registry_metadata_changed = True
-                    if registry_metadata_changed and self.data is not None:
+                    if registry_metadata_changed:
                         self._async_register_device(device)
+
+                if has_new_topology and not self._reload_pending:
+                    # Platform setup is capability-driven. Reload only when the
+                    # cloud reports newly supported entities, including new
+                    # capabilities of existing management points.
+                    # Missing controls remain registered but unavailable.
+                    self._reload_pending = True
+                    self.hass.config_entries.async_schedule_reload(
+                        self.config_entry.entry_id
+                    )
 
                 self.update_interval = self._determine_update_interval()
 
@@ -287,6 +349,17 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
     async def _async_update_data(self) -> dict[str, DaikinOnectaDevice]:
         """Fetch data for the Home Assistant coordinator interface."""
         return await self._async_update_data_from_cloud()
+
+    @staticmethod
+    def _topology(
+        devices: Iterable[GatewayDevice],
+    ) -> set[tuple[str, str | None, str]]:
+        """Return supported entity identities, independent of their current values."""
+        return {
+            entity_key
+            for device in devices
+            for entity_key in gateway_entity_keys(device)
+        }
 
     def _determine_update_interval(self) -> timedelta:
         """Determine the next polling interval."""

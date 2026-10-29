@@ -1,7 +1,9 @@
 """Platform for the Daikin AC."""
 
 import aiohttp
+from daikin_onecta.exceptions import OnectaError
 
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady, OAuth2TokenRequestError
@@ -9,12 +11,25 @@ from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.config_entry_oauth2_flow import (
     ImplementationUnavailableError,
 )
+from homeassistant.helpers.device_registry import AnyDeviceEntry, DeviceEntry
 
 from .const import DOMAIN
-from .coordinator import DaikinOnectaConfigEntry, OnectaDataUpdateCoordinator
+from .coordinator import (
+    DaikinOnectaConfigEntry,
+    OnectaDataUpdateCoordinator,
+    gateway_site_membership,
+)
 
 PLATFORMS = [
+    Platform.BINARY_SENSOR,
+    Platform.BUTTON,
     Platform.CLIMATE,
+    Platform.FAN,
+    Platform.SELECT,
+    Platform.SENSOR,
+    Platform.SWITCH,
+    Platform.UPDATE,
+    Platform.WATER_HEATER,
 ]
 
 
@@ -60,3 +75,48 @@ async def async_unload_entry(
 ) -> None:
     """Unload a config entry."""
     await hass.config_entries.async_unload_platforms_or_raise(config_entry, PLATFORMS)
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant,
+    config_entry: DaikinOnectaConfigEntry,
+    device_entry: AnyDeviceEntry,
+) -> bool:
+    """Allow explicit removal only for gateways confirmed absent from the account."""
+    if config_entry.state is not ConfigEntryState.LOADED or not isinstance(
+        device_entry, DeviceEntry
+    ):
+        return False
+    gateway_id = next(
+        (
+            identifier
+            for domain, identifier in device_entry.identifiers
+            if domain == DOMAIN
+        ),
+        None,
+    )
+    account_id = config_entry.unique_id or config_entry.entry_id
+    if gateway_id is None or gateway_id == f"account_{account_id}":
+        return False
+
+    coordinator = config_entry.runtime_data
+    device = (coordinator.data or {}).get(gateway_id)
+    if not coordinator.last_update_success or device is None or device.present_in_cloud:
+        return False
+    try:
+        sites = await coordinator.async_get_sites()
+    except OnectaError, aiohttp.ClientError, TimeoutError:
+        return False
+
+    # Polling may have restored the gateway while the on-demand lookup awaited.
+    device = (coordinator.data or {}).get(gateway_id)
+    if (
+        gateway_site_membership(sites, gateway_id) is not False
+        or not coordinator.last_update_success
+        or device is None
+        or device.present_in_cloud
+    ):
+        return False
+    if coordinator.data is not None:
+        coordinator.data.pop(gateway_id, None)
+    return True

@@ -2,7 +2,11 @@
   "domain": "daikin_onecta",
   "name": "Daikin Onecta",
   "after_dependencies": ["zeroconf"],
-  "categories": ["climate.heat_pumps_air_conditioning"],
+  "categories": [
+    "climate.air_purifiers_humidifiers",
+    "climate.heat_pumps_air_conditioning",
+    "climate.water_heaters"
+  ],
   "codeowners": ["@jwillemsen"],
   "config_flow": true,
   "dependencies": ["application_credentials"],
@@ -10,7 +14,7 @@
   "integration_type": "hub",
   "iot_class": "cloud_polling",
   "quality_scale": "bronze",
-  "requirements": ["daikin-onecta==0.6.0"],
+  "requirements": ["daikin-onecta==0.6.1"],
   "zeroconf": [
     {
       "name": "altherma4-*._https._tcp.local.",

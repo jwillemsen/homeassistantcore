@@ -22,7 +22,10 @@ from freezegun.api import FrozenDateTimeFactory
 import pytest
 from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 
-from homeassistant.components.daikin_onecta import coordinator as coordinator_module
+from homeassistant.components.daikin_onecta import (
+    PLATFORMS,
+    coordinator as coordinator_module,
+)
 from homeassistant.components.daikin_onecta.const import DOMAIN
 from homeassistant.components.daikin_onecta.coordinator import (
     OnectaDataUpdateCoordinator,
@@ -32,6 +35,7 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
+    OAuth2TokenRequestError,
     OAuth2TokenRequestReauthError,
 )
 from homeassistant.helpers import device_registry as dr
@@ -174,6 +178,38 @@ async def test_device_registry_updates_changed_mac_address(
     assert not gateway.set_device_data(deepcopy(replacement))
 
 
+async def test_management_point_hardware_is_registered_as_subdevice(
+    hass: HomeAssistant,
+    device_registry: dr.DeviceRegistry,
+    config_entry: MockConfigEntry,
+) -> None:
+    """Register physical management points beneath their cloud gateway."""
+    await _async_setup_fixture(hass, config_entry, "altherma_firmwareupdate")
+    device = next(iter(config_entry.runtime_data.data.values()))
+
+    gateway_entry = device_registry.async_get_device_by_identifier(
+        (DOMAIN, device.id), config_entry.entry_id
+    )
+    assert gateway_entry is not None
+    point = device.device.management_points_by_type("userInterface")[0]
+    point_entry = device_registry.async_get_child_device_by_identifier(
+        (DOMAIN, f"{device.id}_{point.embedded_id}"), config_entry.entry_id
+    )
+    assert point_entry is not None
+    assert point_entry.name == "User interface"
+    assert point_entry.parent_device_id == gateway_entry.id
+
+
+def test_device_update_detects_management_point_metadata_changes() -> None:
+    """Refresh registry metadata when physical management-point data changes."""
+    device = DaikinOnectaDevice(_load_gateway_devices("altherma_firmwareupdate")[0])
+    replacement = deepcopy(device.device)
+    point = replacement.management_points_by_type("indoorUnitHydro")[0]
+    point.software_version = Characteristic(value="new-firmware")
+
+    assert device.set_device_data(replacement)
+
+
 async def test_poll_refreshes_changed_metadata_once(
     hass: HomeAssistant,
     config_entry: MockConfigEntry,
@@ -291,6 +327,7 @@ async def coordinator(
 ) -> OnectaDataUpdateCoordinator:
     """Return a coordinator."""
     mock_config_entry.add_to_hass(hass)
+    hass.config_entries.async_schedule_reload = MagicMock()
     coordinator = OnectaDataUpdateCoordinator(hass, mock_config_entry, MagicMock())
     coordinator._async_register_device = MagicMock()
     return coordinator
@@ -347,6 +384,40 @@ class TestOnectaDataUpdateCoordinator:
         assert high_interval == timedelta(seconds=594)
         assert low_interval == timedelta(seconds=1782)
         assert ceil(15 * 3600 / 594) + ceil(9 * 3600 / 1782) == 110
+
+    async def test_command_token_rejection_starts_reauthentication(
+        self, coordinator: OnectaDataUpdateCoordinator
+    ) -> None:
+        """Start reauthentication when token renewal rejects a command."""
+        error = OAuth2TokenRequestReauthError(
+            domain=DOMAIN,
+            request_info=MagicMock(),
+            status=401,
+            message="invalid_grant",
+        )
+        command = AsyncMock(side_effect=error)
+        coordinator.config_entry.async_start_reauth = MagicMock()
+
+        assert not await coordinator.async_execute_command(command)
+
+        coordinator.config_entry.async_start_reauth.assert_called_once_with(
+            coordinator.hass
+        )
+        assert coordinator.last_patch_call is None
+
+    async def test_transient_command_token_failure_returns_failure(
+        self, coordinator: OnectaDataUpdateCoordinator
+    ) -> None:
+        """Map a transient token renewal failure to a failed command."""
+        error = OAuth2TokenRequestError(
+            domain=DOMAIN,
+            request_info=MagicMock(),
+            status=500,
+            message="server error",
+        )
+
+        assert not await coordinator.async_execute_command(AsyncMock(side_effect=error))
+        assert coordinator.last_patch_call is None
 
     def test_polling_intervals_use_reported_daily_limit(self, coordinator):
         """Adapt the polling budget when Daikin reports a different limit."""
@@ -742,6 +813,7 @@ class TestOnectaDataUpdateCoordinator:
     async def test_missing_cloud_device_is_marked_unavailable(self, coordinator):
         """Mark cached gateways unavailable when the cloud no longer returns them."""
         missing_device = MagicMock()
+        missing_device.device = MagicMock(id="missing", management_points=[])
         coordinator.data = {"missing": missing_device}
         coordinator._last_patch_call = None
         coordinator._async_get_cloud_devices = AsyncMock(return_value=[])
@@ -749,6 +821,83 @@ class TestOnectaDataUpdateCoordinator:
         await coordinator._async_update_data_from_cloud()
 
         missing_device.mark_unavailable.assert_called_once_with()
+        coordinator.hass.config_entries.async_schedule_reload.assert_not_called()
+
+    async def test_new_cloud_gateway_schedules_reload(self, coordinator):
+        """Reload platforms when ONECTA reports a newly added gateway."""
+        existing_device = MagicMock()
+        existing_device.device = MagicMock(id="existing", management_points=[])
+        existing_device.set_device_data.return_value = False
+        new_device = MagicMock(
+            id="new",
+            display_name="New device",
+            available=True,
+            device_model="BRP069",
+            gateway_embedded_id=None,
+            mac_address=None,
+            management_points=[],
+        )
+        coordinator.data = {"existing": existing_device}
+        coordinator._last_patch_call = None
+        coordinator._async_get_cloud_devices = AsyncMock(
+            return_value=[existing_device.device, new_device]
+        )
+
+        await coordinator._async_update_data_from_cloud()
+
+        coordinator.hass.config_entries.async_schedule_reload.assert_called_once_with(
+            coordinator.config_entry.entry_id
+        )
+
+    async def test_new_management_point_schedules_reload(self, coordinator):
+        """Reload platforms when ONECTA adds a management point."""
+        existing_device = MagicMock()
+        existing_device.device = MagicMock(
+            id="gateway",
+            management_points=[
+                MagicMock(
+                    embedded_id="climate",
+                    management_point_type="climateControl",
+                )
+            ],
+        )
+        existing_device.set_device_data.return_value = False
+        updated_device = MagicMock(
+            id="gateway",
+            management_points=[
+                MagicMock(
+                    embedded_id="climate",
+                    management_point_type="climateControl",
+                ),
+                MagicMock(
+                    embedded_id="hot_water",
+                    management_point_type="domesticHotWaterTank",
+                ),
+            ],
+        )
+        coordinator.data = {"gateway": existing_device}
+        coordinator._last_patch_call = None
+        coordinator._async_get_cloud_devices = AsyncMock(return_value=[updated_device])
+
+        await coordinator._async_update_data_from_cloud()
+
+        coordinator.hass.config_entries.async_schedule_reload.assert_called_once_with(
+            coordinator.config_entry.entry_id
+        )
+
+    async def test_unchanged_cloud_topology_does_not_schedule_reload(self, coordinator):
+        """Do not reload platforms for ordinary state updates."""
+        existing_device = MagicMock()
+        cloud_device = MagicMock(id="gateway", management_points=[])
+        existing_device.device = cloud_device
+        existing_device.set_device_data.return_value = False
+        coordinator.data = {"gateway": existing_device}
+        coordinator._last_patch_call = None
+        coordinator._async_get_cloud_devices = AsyncMock(return_value=[cloud_device])
+
+        await coordinator._async_update_data_from_cloud()
+
+        coordinator.hass.config_entries.async_schedule_reload.assert_not_called()
 
     async def test_updated_cloud_device_replaces_cached_model(self, coordinator):
         """Replace the cached gateway model with cloud data."""
@@ -805,7 +954,7 @@ async def test_device_registered_before_platform_setup(
     ) as forward:
         await _async_setup_fixture(hass, config_entry, "mc80z")
 
-    forward.assert_awaited_once_with(config_entry, [Platform.CLIMATE])
+    forward.assert_awaited_once_with(config_entry, PLATFORMS)
     assert (
         device_registry.async_get_device_by_identifier(
             (DOMAIN, gateway.id), config_entry.entry_id
