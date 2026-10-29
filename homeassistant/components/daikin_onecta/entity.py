@@ -166,7 +166,7 @@ class DaikinManagementPointEntity(DaikinEntity):
 
         management_point_type = self._management_point_type
         return ChildDeviceInfo(
-            identifiers={(DOMAIN, f"{self._device.id}{self._embedded_id}")},
+            identifiers={(DOMAIN, f"{self._device.id}_{self._embedded_id}")},
             name=MANAGEMENT_POINT_DEVICE_NAMES.get(
                 management_point_type,
                 management_point_type[0].upper() + management_point_type[1:],

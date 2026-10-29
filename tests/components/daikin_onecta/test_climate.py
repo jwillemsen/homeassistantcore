@@ -1392,7 +1392,7 @@ async def test_climate_service_updates_entity_state(
     )
     assert entity_id == "climate.daikin_climatecontrol_room_temperature"
     child_entry = device_registry.async_get_child_device_by_identifier(
-        (DOMAIN, "gatewayzone"), config_entry.entry_id
+        (DOMAIN, "gateway_zone"), config_entry.entry_id
     )
     assert child_entry is not None
     assert child_entry.parent_device_id == gateway_entry.id

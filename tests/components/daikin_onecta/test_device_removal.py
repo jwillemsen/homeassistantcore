@@ -155,16 +155,16 @@ async def test_remove_management_point_device_is_rejected(
     coordinator = config_entry.runtime_data
     coordinator.async_get_sites = AsyncMock(return_value=[])
     gateway_id = next(iter(coordinator.data))
-    device_entry = next(
-        entry
-        for entry in dr.async_entries_for_config_entry(
-            device_registry, config_entry.entry_id
-        )
-        if any(
-            domain == DOMAIN and identifier.startswith(f"{gateway_id}_")
-            for domain, identifier in entry.identifiers
-        )
+    management_point = next(
+        point
+        for point in coordinator.data[gateway_id].device.management_points
+        if point.management_point_type == "climateControl"
     )
+    device_entry = device_registry.async_get_child_device_by_identifier(
+        (DOMAIN, f"{gateway_id}_{management_point.embedded_id}"),
+        config_entry.entry_id,
+    )
+    assert device_entry is not None
 
     assert not await async_remove_config_entry_device(hass, config_entry, device_entry)
     coordinator.async_get_sites.assert_not_awaited()

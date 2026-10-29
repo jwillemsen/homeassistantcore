@@ -184,24 +184,20 @@ async def test_management_point_hardware_is_registered_as_subdevice(
     config_entry: MockConfigEntry,
 ) -> None:
     """Register physical management points beneath their cloud gateway."""
-    coordinator = OnectaDataUpdateCoordinator(hass, config_entry, MagicMock())
-    device = DaikinOnectaDevice(_load_gateway_devices("altherma_firmwareupdate")[0])
-
-    coordinator._async_register_device(device)
+    await _async_setup_fixture(hass, config_entry, "altherma_firmwareupdate")
+    device = next(iter(config_entry.runtime_data.data.values()))
 
     gateway_entry = device_registry.async_get_device_by_identifier(
         (DOMAIN, device.id), config_entry.entry_id
     )
     assert gateway_entry is not None
-    point = device.device.management_points_by_type("indoorUnitHydro")[0]
-    point_entry = device_registry.async_get_device_by_identifier(
+    point = device.device.management_points_by_type("userInterface")[0]
+    point_entry = device_registry.async_get_child_device_by_identifier(
         (DOMAIN, f"{device.id}_{point.embedded_id}"), config_entry.entry_id
     )
     assert point_entry is not None
-    assert point_entry.name == f"{device.name} Indoor hydro unit"
-    assert point_entry.model == point.model
-    assert point_entry.sw_version == point.version
-    assert point_entry.via_device_id == gateway_entry.id
+    assert point_entry.name == "User interface"
+    assert point_entry.parent_device_id == gateway_entry.id
 
 
 def test_device_update_detects_management_point_metadata_changes() -> None:
