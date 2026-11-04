@@ -1,10 +1,12 @@
 """Snapshot tests for Daikin Onecta climate entities."""
 
+from datetime import UTC, datetime
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from daikin_onecta.models import GatewayDevice
+from freezegun.api import FrozenDateTimeFactory
 import pytest
 from pytest_homeassistant.common import MockConfigEntry
 from pytest_homeassistant.syrupy import HomeAssistantSnapshotExtension
@@ -128,9 +130,11 @@ async def test_all_platform_entities(
     config_entry: MockConfigEntry,
     entity_registry: er.EntityRegistry,
     snapshot: SnapshotAssertion,
+    freezer: FrozenDateTimeFactory,
     fixture: str,
 ) -> None:
     """Snapshot all entities from each archived Daikin cloud response."""
+    freezer.move_to(datetime(2026, 10, 15, 12, tzinfo=UTC))
     await _async_setup_fixture(hass, config_entry, fixture)
 
     entities = {}

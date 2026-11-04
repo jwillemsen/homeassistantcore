@@ -255,6 +255,12 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
         devices = previous_devices or {}
         if (remaining := self._polling_backoff_remaining()) is not None:
             self.update_interval = remaining
+            if not self.last_update_success:
+                raise UpdateFailed(
+                    translation_domain=DOMAIN,
+                    translation_key="rate_limit_exceeded",
+                    retry_after=remaining.total_seconds(),
+                )
             return devices
 
         if (
@@ -263,6 +269,12 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
             < _POST_WRITE_COOLDOWN.total_seconds()
         ):
             self.update_interval = _POST_WRITE_COOLDOWN
+            if not self.last_update_success:
+                raise UpdateFailed(
+                    translation_domain=DOMAIN,
+                    translation_key="refresh_deferred",
+                    retry_after=_POST_WRITE_COOLDOWN.total_seconds(),
+                )
         else:
             # Restore the normal polling interval before fetching. If the
             # request fails, retries must not remain at the cooldown cadence.
@@ -276,6 +288,7 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
                 # authentication failures rather than retrying the coordinator.
                 raise
             except OnectaRateLimitError as err:
+                # Retry-After delays scheduled polling; manual updates still poll.
                 raise UpdateFailed(
                     translation_domain=DOMAIN,
                     translation_key="rate_limit_exceeded",
@@ -304,9 +317,18 @@ class OnectaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, DaikinOnectaDe
                 ) from err
 
             if cloud_devices is None:
-                self.update_interval = (
-                    self._polling_backoff_remaining() or _POST_WRITE_COOLDOWN
-                )
+                retry_after = self._polling_backoff_remaining() or _POST_WRITE_COOLDOWN
+                self.update_interval = retry_after
+                if not self.last_update_success:
+                    raise UpdateFailed(
+                        translation_domain=DOMAIN,
+                        translation_key=(
+                            "rate_limit_exceeded"
+                            if self._polling_backoff_until is not None
+                            else "refresh_deferred"
+                        ),
+                        retry_after=retry_after.total_seconds(),
+                    )
             else:
                 self._cloud_update_sequence += 1
                 has_new_topology = previous_devices is not None and bool(
