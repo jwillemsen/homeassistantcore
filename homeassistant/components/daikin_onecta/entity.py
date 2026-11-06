@@ -1,18 +1,36 @@
-"""Base entity for the Daikin Onecta integration."""
+"""Base entities for the Daikin Onecta integration."""
 
+from collections.abc import Awaitable, Callable
 from typing import Never, override
+
+from daikin_onecta.client import OnectaClient
 
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.device_registry import (
     CONNECTION_NETWORK_MAC,
     ChildDeviceInfo,
+    DeviceEntryType,
     DeviceInfo,
 )
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import DOMAIN, MANAGEMENT_POINT_DEVICE_NAMES
 from .coordinator import OnectaDataUpdateCoordinator
 from .device import DaikinOnectaDevice
+
+
+def _add_management_point_metadata(
+    info: DeviceInfo, device: DaikinOnectaDevice, embedded_id: str
+) -> None:
+    """Add management-point metadata to a device-info object."""
+    if (management_point := device.management_point(embedded_id)) is None:
+        return
+    if management_point.model is not None:
+        info["model"] = management_point.model
+    if management_point.serial is not None:
+        info["serial_number"] = management_point.serial
+    if management_point.version is not None:
+        info["sw_version"] = management_point.version
 
 
 class DaikinOnectaEntity(CoordinatorEntity[OnectaDataUpdateCoordinator]):
@@ -60,12 +78,98 @@ class DaikinOnectaEntity(CoordinatorEntity[OnectaDataUpdateCoordinator]):
             name=self._device.name,
         )
         if (embedded_id := gateway.gateway_embedded_id) is not None and (
-            management_point := gateway.management_point(embedded_id)
-        ) is not None:
-            if management_point.model is not None:
-                info["model"] = management_point.model
-            if management_point.serial is not None:
-                info["serial_number"] = management_point.serial
-            if management_point.version is not None:
-                info["sw_version"] = management_point.version
+            gateway.management_point(embedded_id) is not None
+        ):
+            _add_management_point_metadata(info, self._device, embedded_id)
         return info
+
+
+class DaikinOnectaAccountEntity(CoordinatorEntity[OnectaDataUpdateCoordinator]):
+    """Base entity backed by a Daikin Onecta account."""
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: OnectaDataUpdateCoordinator) -> None:
+        """Initialize shared account state."""
+        super().__init__(coordinator)
+        self._account_id = (
+            coordinator.config_entry.unique_id or coordinator.config_entry.entry_id
+        )
+        self._attr_device_info = DeviceInfo(
+            entry_type=DeviceEntryType.SERVICE,
+            identifiers={(DOMAIN, f"account_{self._account_id}")},
+            manufacturer="Daikin",
+            name="Daikin Onecta account",
+        )
+
+
+class DaikinEntity(DaikinOnectaEntity):
+    """Base entity backed by a Daikin gateway or management point."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        device: DaikinOnectaDevice,
+        coordinator: OnectaDataUpdateCoordinator,
+        embedded_id: str | None = None,
+    ) -> None:
+        """Initialize shared coordinator and device state."""
+        super().__init__(coordinator, device)
+        self._embedded_id = embedded_id
+
+    @property
+    @override
+    def available(self) -> bool:
+        """Return whether the coordinator, device, and point are available."""
+        if not super().available or not self._device.available:
+            return False
+        return self._embedded_id is None or (
+            self._device.management_point(self._embedded_id) is not None
+        )
+
+    async def _async_execute_command(
+        self,
+        command: Callable[[OnectaClient], Awaitable[None]],
+        translation_key: str,
+    ) -> None:
+        """Execute a cloud command or raise a translated Home Assistant error."""
+        if not await self.coordinator.async_execute_command(command):
+            self._raise_command_failed(translation_key)
+
+
+class DaikinManagementPointEntity(DaikinEntity):
+    """Base entity backed by a Daikin management point."""
+
+    _embedded_id: str
+
+    def __init__(
+        self,
+        device: DaikinOnectaDevice,
+        coordinator: OnectaDataUpdateCoordinator,
+        embedded_id: str,
+    ) -> None:
+        """Initialize a management-point entity."""
+        super().__init__(device, coordinator, embedded_id)
+        point = device.management_point(embedded_id)
+        self._management_point_type = (
+            point.management_point_type if point is not None else None
+        )
+
+    @property
+    @override
+    def device_info(self) -> DeviceInfo | ChildDeviceInfo:
+        """Return a physical management point as a gateway child device."""
+        if self._management_point_type is None:
+            return super().device_info
+        assert self._device.ha_device_id is not None
+
+        management_point_type = self._management_point_type
+        return ChildDeviceInfo(
+            identifiers={(DOMAIN, f"{self._device.id}_{self._embedded_id}")},
+            name=MANAGEMENT_POINT_DEVICE_NAMES.get(
+                management_point_type,
+                management_point_type[0].upper() + management_point_type[1:],
+            ),
+            parent_device_id=self._device.ha_device_id,
+        )

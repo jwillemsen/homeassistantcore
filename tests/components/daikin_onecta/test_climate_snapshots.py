@@ -1,10 +1,12 @@
 """Snapshot tests for Daikin Onecta climate entities."""
 
+from datetime import UTC, datetime
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from daikin_onecta.models import GatewayDevice
+from freezegun.api import FrozenDateTimeFactory
 import pytest
 from pytest_homeassistant.common import MockConfigEntry
 from pytest_homeassistant.syrupy import HomeAssistantSnapshotExtension
@@ -118,6 +120,32 @@ async def test_climate_entities(
         climate_entities[entry.entity_id] = {"entry": entry, "state": state}
 
     assert climate_entities == snapshot(
+        name=fixture, extension_class=SingleFileHomeAssistantSnapshotExtension
+    )
+
+
+@pytest.mark.parametrize("fixture", FIXTURES)
+async def test_all_platform_entities(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    entity_registry: er.EntityRegistry,
+    snapshot: SnapshotAssertion,
+    freezer: FrozenDateTimeFactory,
+    fixture: str,
+) -> None:
+    """Snapshot all entities from each archived Daikin cloud response."""
+    freezer.move_to(datetime(2026, 10, 15, 12, tzinfo=UTC))
+    await _async_setup_fixture(hass, config_entry, fixture)
+
+    entities = {}
+    for entry in er.async_entries_for_config_entry(
+        entity_registry, config_entry.entry_id
+    ):
+        state = hass.states.get(entry.entity_id)
+        assert (state is None) == (entry.disabled_by is not None)
+        entities[entry.entity_id] = {"entry": entry, "state": state}
+
+    assert entities == snapshot(
         name=fixture, extension_class=SingleFileHomeAssistantSnapshotExtension
     )
 
