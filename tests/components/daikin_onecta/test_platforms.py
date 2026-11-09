@@ -18,6 +18,8 @@ from homeassistant.components.button import DOMAIN as BUTTON_DOMAIN, SERVICE_PRE
 from homeassistant.components.climate import (
     DOMAIN as CLIMATE_DOMAIN,
     SERVICE_SET_TEMPERATURE as CLIMATE_SERVICE_SET_TEMPERATURE,
+    ClimateEntityStateAttribute,
+    ClimateServiceArgument,
 )
 from homeassistant.components.daikin_onecta import OnectaDataUpdateCoordinator
 from homeassistant.components.daikin_onecta.binary_sensor import (
@@ -58,11 +60,16 @@ from homeassistant.components.fan import (
     SERVICE_SET_PRESET_MODE,
     SERVICE_TURN_OFF as FAN_SERVICE_TURN_OFF,
     SERVICE_TURN_ON as FAN_SERVICE_TURN_ON,
+    FanEntityCapabilityAttribute,
     FanEntityFeature,
+    FanEntityStateAttribute,
+    FanServiceArgument,
 )
 from homeassistant.components.select import (
     DOMAIN as SELECT_DOMAIN,
     SERVICE_SELECT_OPTION,
+    SelectEntityCapabilityAttribute,
+    SelectServiceArgument,
 )
 from homeassistant.components.sensor import DOMAIN as SENSOR_DOMAIN
 from homeassistant.components.switch import (
@@ -74,6 +81,7 @@ from homeassistant.components.update import (
     DOMAIN as UPDATE_DOMAIN,
     SERVICE_INSTALL,
     UpdateEntityFeature,
+    UpdateEntityStateAttribute,
 )
 from homeassistant.components.water_heater import (
     DOMAIN as WATER_HEATER_DOMAIN,
@@ -84,13 +92,10 @@ from homeassistant.components.water_heater import (
     STATE_OFF,
     STATE_PERFORMANCE,
     WaterHeaterEntityFeature,
+    WaterHeaterServiceArgument,
+    WaterHeaterStateAttribute,
 )
-from homeassistant.const import (
-    ATTR_ENTITY_ID,
-    ATTR_TEMPERATURE,
-    EntityCategory,
-    UnitOfTemperature,
-)
+from homeassistant.const import ATTR_ENTITY_ID, EntityCategory, UnitOfTemperature
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import entity_registry as er
@@ -528,7 +533,10 @@ async def test_switch_updates_sibling_climate_preset(
         config_entry
     )
     entity_id = "climate.test_living_room_climatecontrol_room_temperature"
-    assert hass.states.get(entity_id).attributes["preset_mode"] == "eco"
+    assert (
+        hass.states.get(entity_id).attributes[ClimateEntityStateAttribute.PRESET_MODE]
+        == "eco"
+    )
 
     for service, expected in (
         (SWITCH_SERVICE_TURN_OFF, "none"),
@@ -540,7 +548,12 @@ async def test_switch_updates_sibling_climate_preset(
             {ATTR_ENTITY_ID: "switch.test_living_room_climatecontrol_econo_mode"},
             blocking=True,
         )
-        assert hass.states.get(entity_id).attributes["preset_mode"] == expected
+        assert (
+            hass.states.get(entity_id).attributes[
+                ClimateEntityStateAttribute.PRESET_MODE
+            ]
+            == expected
+        )
 
 
 @pytest.mark.parametrize(
@@ -551,8 +564,8 @@ async def test_switch_updates_sibling_climate_preset(
             WATER_HEATER_DOMAIN,
             WATER_HEATER_SERVICE_SET_TEMPERATURE,
             "water_heater.altherma_domestichotwatertank",
-            {ATTR_TEMPERATURE: 50},
-            "temperature",
+            {WaterHeaterServiceArgument.TEMPERATURE: 50},
+            WaterHeaterStateAttribute.TARGET_TEMPERATURE,
             50,
         ),
         (
@@ -560,8 +573,8 @@ async def test_switch_updates_sibling_climate_preset(
             FAN_DOMAIN,
             SERVICE_SET_PRESET_MODE,
             "fan.air_purifier_climatecontrol",
-            {"preset_mode": "autoFan"},
-            "preset_mode",
+            {FanServiceArgument.PRESET_MODE: "autoFan"},
+            FanEntityStateAttribute.PRESET_MODE,
             "autoFan",
         ),
         (
@@ -569,8 +582,8 @@ async def test_switch_updates_sibling_climate_preset(
             FAN_DOMAIN,
             SERVICE_SET_PERCENTAGE,
             "fan.air_purifier_climatecontrol",
-            {"percentage": 100},
-            "percentage",
+            {FanServiceArgument.PERCENTAGE: 100},
+            FanEntityStateAttribute.PERCENTAGE,
             100,
         ),
     ],
@@ -619,7 +632,10 @@ async def test_air_purifier_speed_updates_captured_mode_after_model_replacement(
     await hass.services.async_call(
         FAN_DOMAIN,
         SERVICE_SET_PERCENTAGE,
-        {ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol", "percentage": 50},
+        {
+            ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol",
+            FanServiceArgument.PERCENTAGE: 50,
+        },
         blocking=True,
     )
     device = next(
@@ -642,7 +658,10 @@ async def test_air_purifier_speed_updates_captured_mode_after_model_replacement(
     await hass.services.async_call(
         FAN_DOMAIN,
         SERVICE_SET_PERCENTAGE,
-        {ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol", "percentage": 100},
+        {
+            ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol",
+            FanServiceArgument.PERCENTAGE: 100,
+        },
         blocking=True,
     )
 
@@ -798,7 +817,10 @@ async def test_schedule_select_updates_cached_selection(
     await hass.services.async_call(
         SELECT_DOMAIN,
         SERVICE_SELECT_OPTION,
-        {ATTR_ENTITY_ID: "select.master_climatecontrol_schedule", "option": "1"},
+        {
+            ATTR_ENTITY_ID: "select.master_climatecontrol_schedule",
+            SelectServiceArgument.OPTION: "1",
+        },
         blocking=True,
     )
 
@@ -824,13 +846,15 @@ async def test_schedule_named_off_does_not_disable_schedule(
 
     state = hass.states.get("select.master_climatecontrol_schedule")
     assert state is not None
-    assert "off" in state.attributes["options"]
-    assert SCHEDULE_DISABLED in state.attributes["options"]
+    assert "off" in state.attributes[SelectEntityCapabilityAttribute.OPTIONS]
+    assert (
+        SCHEDULE_DISABLED in state.attributes[SelectEntityCapabilityAttribute.OPTIONS]
+    )
 
     await hass.services.async_call(
         SELECT_DOMAIN,
         SERVICE_SELECT_OPTION,
-        {ATTR_ENTITY_ID: state.entity_id, "option": "off"},
+        {ATTR_ENTITY_ID: state.entity_id, SelectServiceArgument.OPTION: "off"},
         blocking=True,
     )
 
@@ -858,7 +882,10 @@ async def test_schedule_select_ignores_current_option(
     await hass.services.async_call(
         SELECT_DOMAIN,
         SERVICE_SELECT_OPTION,
-        {ATTR_ENTITY_ID: state.entity_id, "option": state.state},
+        {
+            ATTR_ENTITY_ID: state.entity_id,
+            SelectServiceArgument.OPTION: state.state,
+        },
         blocking=True,
     )
 
@@ -879,7 +906,10 @@ async def test_schedule_select_preserves_read_only_disabled_state(
     await hass.services.async_call(
         SELECT_DOMAIN,
         SERVICE_SELECT_OPTION,
-        {ATTR_ENTITY_ID: state.entity_id, "option": "althermaClimateControl1"},
+        {
+            ATTR_ENTITY_ID: state.entity_id,
+            SelectServiceArgument.OPTION: "althermaClimateControl1",
+        },
         blocking=True,
     )
 
@@ -1009,7 +1039,7 @@ async def test_water_heater_turn_off_updates_cached_state(
 
     state = hass.states.get("water_heater.altherma_domestichotwatertank")
     assert state is not None
-    assert state.attributes["operation_mode"] == "off"
+    assert state.attributes[WaterHeaterStateAttribute.OPERATION_MODE] == "off"
 
     await hass.services.async_call(
         WATER_HEATER_DOMAIN,
@@ -1019,7 +1049,9 @@ async def test_water_heater_turn_off_updates_cached_state(
     )
     state = hass.states.get(state.entity_id)
     assert state is not None
-    assert state.attributes["operation_mode"] == STATE_PERFORMANCE
+    assert (
+        state.attributes[WaterHeaterStateAttribute.OPERATION_MODE] == STATE_PERFORMANCE
+    )
     assert listener.call_count == 2
     remove_listener()
 
@@ -1040,7 +1072,7 @@ async def test_water_heater_temperature_updates_typed_cache(
         WATER_HEATER_SERVICE_SET_TEMPERATURE,
         {
             ATTR_ENTITY_ID: "water_heater.altherma_domestichotwatertank",
-            ATTR_TEMPERATURE: 50,
+            WaterHeaterServiceArgument.TEMPERATURE: 50,
         },
         blocking=True,
     )
@@ -1116,45 +1148,82 @@ async def test_firmware_install_executes_command(
     config_entry.runtime_data.async_execute_command.assert_awaited_once()
     state = hass.states.get("update.living_room_gateway_firmware_update")
     assert state is not None
-    assert state.attributes["in_progress"] is True
+    assert state.attributes[UpdateEntityStateAttribute.IN_PROGRESS] is True
 
     coordinator = config_entry.runtime_data
     coordinator.async_update_listeners()
-    assert hass.states.get(state.entity_id).attributes["in_progress"] is True
+    assert (
+        hass.states.get(state.entity_id).attributes[
+            UpdateEntityStateAttribute.IN_PROGRESS
+        ]
+        is True
+    )
 
     await hass.services.async_call(
         CLIMATE_DOMAIN,
         CLIMATE_SERVICE_SET_TEMPERATURE,
         {
             ATTR_ENTITY_ID: "climate.living_room_room_temperature",
-            ATTR_TEMPERATURE: 25,
+            ClimateServiceArgument.TEMPERATURE: 25,
         },
         blocking=True,
     )
-    assert hass.states.get(state.entity_id).attributes["in_progress"] is True
+    assert (
+        hass.states.get(state.entity_id).attributes[
+            UpdateEntityStateAttribute.IN_PROGRESS
+        ]
+        is True
+    )
 
     # A few fresh polls without status or version evidence may still be stale.
     gateways = _load_gateway_devices("dx4_firmwareavailable")
     coordinator._async_get_cloud_devices = AsyncMock(return_value=gateways)
     await _async_fire_coordinator_update(hass, coordinator, freezer)
-    assert hass.states.get(state.entity_id).attributes["in_progress"] is True
+    assert (
+        hass.states.get(state.entity_id).attributes[
+            UpdateEntityStateAttribute.IN_PROGRESS
+        ]
+        is True
+    )
     await _async_fire_coordinator_update(hass, coordinator, freezer)
-    assert hass.states.get(state.entity_id).attributes["in_progress"] is True
+    assert (
+        hass.states.get(state.entity_id).attributes[
+            UpdateEntityStateAttribute.IN_PROGRESS
+        ]
+        is True
+    )
     await _async_fire_coordinator_update(hass, coordinator, freezer)
-    assert hass.states.get(state.entity_id).attributes["in_progress"] is False
+    assert (
+        hass.states.get(state.entity_id).attributes[
+            UpdateEntityStateAttribute.IN_PROGRESS
+        ]
+        is False
+    )
 
     gateway_point = gateways[0].management_point(gateways[0].gateway_embedded_id)
     gateway_point.firmware_update_status = Characteristic(value="in-progress")
     await _async_fire_coordinator_update(hass, coordinator, freezer)
-    assert hass.states.get(state.entity_id).attributes["in_progress"] is True
+    assert (
+        hass.states.get(state.entity_id).attributes[
+            UpdateEntityStateAttribute.IN_PROGRESS
+        ]
+        is True
+    )
 
     gateway_point.firmware_update_status = None
     gateway_point.firmware_version = Characteristic(value="new-version")
     gateway_point.software_version = Characteristic(value="new-version")
     await _async_fire_coordinator_update(hass, coordinator, freezer)
-    assert hass.states.get(state.entity_id).attributes["in_progress"] is False
     assert (
-        hass.states.get(state.entity_id).attributes["installed_version"]
+        hass.states.get(state.entity_id).attributes[
+            UpdateEntityStateAttribute.IN_PROGRESS
+        ]
+        is False
+    )
+    assert (
+        hass.states.get(state.entity_id).attributes[
+            UpdateEntityStateAttribute.INSTALLED_VERSION
+        ]
         == "new-version"
     )
 
@@ -1233,8 +1302,10 @@ async def test_firmware_install_records_pending_state_before_waiting_poll(
     assert entity._pending_install is None
     state = hass.states.get(entity_id)
     assert state is not None
-    assert state.attributes["installed_version"] == "new-version"
-    assert state.attributes["in_progress"] is False
+    assert (
+        state.attributes[UpdateEntityStateAttribute.INSTALLED_VERSION] == "new-version"
+    )
+    assert state.attributes[UpdateEntityStateAttribute.IN_PROGRESS] is False
 
 
 async def test_failed_firmware_install_clears_pending_state() -> None:
@@ -1288,13 +1359,16 @@ async def test_air_purifier_preset_updates_cached_state(
     await hass.services.async_call(
         FAN_DOMAIN,
         SERVICE_SET_PRESET_MODE,
-        {ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol", "preset_mode": "autoFan"},
+        {
+            ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol",
+            FanServiceArgument.PRESET_MODE: "autoFan",
+        },
         blocking=True,
     )
 
     state = hass.states.get("fan.air_purifier_climatecontrol")
     assert state is not None
-    assert state.attributes["preset_mode"] == "autoFan"
+    assert state.attributes[FanEntityStateAttribute.PRESET_MODE] == "autoFan"
 
 
 async def test_air_purifier_percentage_switches_to_manual_and_updates_cache(
@@ -1309,15 +1383,20 @@ async def test_air_purifier_percentage_switches_to_manual_and_updates_cache(
     await hass.services.async_call(
         FAN_DOMAIN,
         SERVICE_SET_PERCENTAGE,
-        {ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol", "percentage": 100},
+        {
+            ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol",
+            FanServiceArgument.PERCENTAGE: 100,
+        },
         blocking=True,
     )
 
     state = hass.states.get("fan.air_purifier_climatecontrol")
     assert state is not None
-    assert state.attributes["preset_mode"] is None
-    assert "manualFan" not in state.attributes["preset_modes"]
-    assert state.attributes["percentage"] == 100
+    assert state.attributes[FanEntityStateAttribute.PRESET_MODE] is None
+    assert (
+        "manualFan" not in state.attributes[FanEntityCapabilityAttribute.PRESET_MODES]
+    )
+    assert state.attributes[FanEntityStateAttribute.PERCENTAGE] == 100
 
 
 async def test_air_purifier_uses_discrete_speed_percentages(
@@ -1330,7 +1409,10 @@ async def test_air_purifier_uses_discrete_speed_percentages(
     await hass.services.async_call(
         FAN_DOMAIN,
         SERVICE_SET_PERCENTAGE,
-        {ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol", "percentage": 100},
+        {
+            ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol",
+            FanServiceArgument.PERCENTAGE: 100,
+        },
         blocking=True,
     )
     coordinator.client.patch_characteristic.reset_mock()
@@ -1338,14 +1420,19 @@ async def test_air_purifier_uses_discrete_speed_percentages(
     await hass.services.async_call(
         FAN_DOMAIN,
         SERVICE_SET_PERCENTAGE,
-        {ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol", "percentage": 25},
+        {
+            ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol",
+            FanServiceArgument.PERCENTAGE: 25,
+        },
         blocking=True,
     )
 
     coordinator.client.patch_characteristic.assert_awaited_once()
     assert coordinator.client.patch_characteristic.await_args.args[3] == 1
     assert (
-        hass.states.get("fan.air_purifier_climatecontrol").attributes["percentage"]
+        hass.states.get("fan.air_purifier_climatecontrol").attributes[
+            FanEntityStateAttribute.PERCENTAGE
+        ]
         == 25
     )
 
@@ -1499,7 +1586,7 @@ async def test_air_purifier_turn_off_then_on_updates_cached_state(
     state = hass.states.get("fan.air_purifier_climatecontrol")
     assert state is not None
     assert state.state == "off"
-    assert state.attributes["percentage"] == 0
+    assert state.attributes[FanEntityStateAttribute.PERCENTAGE] == 0
 
     await hass.services.async_call(
         FAN_DOMAIN,
@@ -1523,7 +1610,10 @@ async def test_air_purifier_ignores_unchanged_preset(
     await hass.services.async_call(
         FAN_DOMAIN,
         SERVICE_SET_PRESET_MODE,
-        {ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol", "preset_mode": "econo"},
+        {
+            ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol",
+            FanServiceArgument.PRESET_MODE: "econo",
+        },
         blocking=True,
     )
 
@@ -1545,20 +1635,26 @@ async def test_air_purifier_percentage_turns_on_and_exits_preset(
         blocking=True,
     )
     assert (
-        hass.states.get("fan.air_purifier_climatecontrol").attributes["percentage"] == 0
+        hass.states.get("fan.air_purifier_climatecontrol").attributes[
+            FanEntityStateAttribute.PERCENTAGE
+        ]
+        == 0
     )
 
     await hass.services.async_call(
         FAN_DOMAIN,
         SERVICE_SET_PERCENTAGE,
-        {ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol", "percentage": 100},
+        {
+            ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol",
+            FanServiceArgument.PERCENTAGE: 100,
+        },
         blocking=True,
     )
     state = hass.states.get("fan.air_purifier_climatecontrol")
     assert state is not None
     assert state.state == "on"
-    assert state.attributes["preset_mode"] is None
-    assert state.attributes["percentage"] == 100
+    assert state.attributes[FanEntityStateAttribute.PRESET_MODE] is None
+    assert state.attributes[FanEntityStateAttribute.PERCENTAGE] == 100
 
 
 async def test_air_purifier_rejects_manual_speed_as_preset(
@@ -1575,7 +1671,7 @@ async def test_air_purifier_rejects_manual_speed_as_preset(
             SERVICE_SET_PRESET_MODE,
             {
                 ATTR_ENTITY_ID: "fan.air_purifier_climatecontrol",
-                "preset_mode": "manualFan",
+                FanServiceArgument.PRESET_MODE: "manualFan",
             },
             blocking=True,
         )

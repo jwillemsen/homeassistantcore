@@ -12,8 +12,9 @@ from homeassistant.components.water_heater import (
     STATE_PERFORMANCE,
     WaterHeaterEntity,
     WaterHeaterEntityFeature,
+    WaterHeaterServiceArgument,
 )
-from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
+from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -214,7 +215,9 @@ class DaikinWaterTank(DaikinManagementPointEntity, WaterHeaterEntity):
     @override
     async def async_set_temperature(self, **kwargs: Any) -> None:
         """Set new target temperature."""
-        if (temperature := kwargs.get(ATTR_TEMPERATURE)) is not None:
+        if (
+            temperature := kwargs.get(WaterHeaterServiceArgument.TEMPERATURE)
+        ) is not None:
             await self.async_set_tank_temperature(float(temperature))
 
     def get_current_operation(self) -> str | None:

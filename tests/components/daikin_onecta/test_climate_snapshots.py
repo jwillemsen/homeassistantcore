@@ -15,9 +15,10 @@ from syrupy.extensions.single_file import SingleFileAmberSnapshotExtension
 from syrupy.location import PyTestLocation
 
 from homeassistant.components.climate import (
-    ATTR_FAN_MODE,
     DOMAIN as CLIMATE_DOMAIN,
     SERVICE_SET_HVAC_MODE,
+    ClimateEntityStateAttribute,
+    ClimateServiceArgument,
     HVACMode,
 )
 from homeassistant.core import HomeAssistant
@@ -163,25 +164,25 @@ async def test_fan_mode_changes_with_hvac_mode(
         SERVICE_SET_HVAC_MODE,
         {
             "entity_id": "climate.sala_climatecontrol_room_temperature",
-            "hvac_mode": HVACMode.COOL,
+            ClimateServiceArgument.HVAC_MODE: HVACMode.COOL,
         },
         blocking=True,
     )
     state = hass.states.get("climate.sala_climatecontrol_room_temperature")
     assert state is not None
     assert state.state == HVACMode.COOL
-    assert state.attributes[ATTR_FAN_MODE] == "3"
+    assert state.attributes[ClimateEntityStateAttribute.FAN_MODE] == "3"
 
     await hass.services.async_call(
         CLIMATE_DOMAIN,
         SERVICE_SET_HVAC_MODE,
         {
             "entity_id": "climate.sala_climatecontrol_room_temperature",
-            "hvac_mode": HVACMode.DRY,
+            ClimateServiceArgument.HVAC_MODE: HVACMode.DRY,
         },
         blocking=True,
     )
     state = hass.states.get("climate.sala_climatecontrol_room_temperature")
     assert state is not None
     assert state.state == HVACMode.DRY
-    assert state.attributes[ATTR_FAN_MODE] == "auto"
+    assert state.attributes[ClimateEntityStateAttribute.FAN_MODE] == "auto"
