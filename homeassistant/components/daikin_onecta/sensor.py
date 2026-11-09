@@ -6,7 +6,12 @@ from typing import TYPE_CHECKING, override
 
 from daikin_onecta.models import EnergyAggregate, ManagementPoint
 
-from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorEntityDescription,
+)
+from homeassistant.const import UnitOfEnergy, UnitOfTemperature
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import dt as dt_util
@@ -31,6 +36,20 @@ if TYPE_CHECKING:
     from .coordinator import OnectaDataUpdateCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _native_unit(unit: str | None, description: SensorEntityDescription) -> str | None:
+    """Return the Daikin unit or the entity-description default."""
+    if unit is None:
+        return description.native_unit_of_measurement
+    try:
+        if description.device_class == SensorDeviceClass.ENERGY:
+            return UnitOfEnergy(unit)
+        if description.device_class == SensorDeviceClass.TEMPERATURE:
+            return UnitOfTemperature(unit)
+    except ValueError:
+        return unit
+    return unit
 
 
 @dataclass(frozen=True)
@@ -254,6 +273,20 @@ class DaikinEnergySensor(DaikinManagementPointEntity, SensorEntity):
     def update_state(self) -> None:
         """Refresh the state from the current device data."""
         self._attr_native_value = self.sensor_value()
+        point = self._device.management_point(self._embedded_id)
+        energy_data = None
+        if point is not None:
+            energy_data = (
+                point.consumption
+                if self._datatype == "consumption"
+                else point.energy_output
+            )
+        source = (
+            energy_data.source(self._sensor_type) if energy_data is not None else None
+        )
+        self._attr_native_unit_of_measurement = _native_unit(
+            source.unit if source is not None else None, self.entity_description
+        )
 
     def _api_period(self) -> str:
         """Return the Daikin API period for this entity."""
@@ -343,6 +376,18 @@ class DaikinValueSensor(DaikinManagementPointEntity, SensorEntity):
     def update_state(self) -> None:
         """Refresh the state from the current device data."""
         self._attr_native_value = self.sensor_value()
+        point = self._device.management_point(self._embedded_id)
+        characteristic = None
+        if point is not None:
+            characteristic = (
+                point.sensory_characteristic(self._value)
+                if self._sub_type == "sensoryData"
+                else point.scalar_characteristic(self._value)
+            )
+        self._attr_native_unit_of_measurement = _native_unit(
+            characteristic.unit if characteristic is not None else None,
+            self.entity_description,
+        )
 
     @callback
     @override

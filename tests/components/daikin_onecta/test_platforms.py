@@ -46,6 +46,8 @@ from homeassistant.components.daikin_onecta.select import DaikinScheduleSelect
 from homeassistant.components.daikin_onecta.sensor import (
     DaikinEnergySensor,
     DaikinValueSensor,
+    EnergySensorDetails,
+    ValueSensorDetails,
     add_energy_sensors,
 )
 from homeassistant.components.daikin_onecta.switch import (
@@ -748,6 +750,99 @@ def test_water_heater_handles_missing_temperature_values() -> None:
     assert entity.max_temp == super(DaikinWaterTank, entity).max_temp
 
 
+@pytest.mark.parametrize(
+    ("setpoint_unit", "sensory_unit", "expected_unit"),
+    [
+        ("°F", None, UnitOfTemperature.FAHRENHEIT),
+        (None, "°F", UnitOfTemperature.FAHRENHEIT),
+        (None, None, UnitOfTemperature.CELSIUS),
+    ],
+)
+def test_water_heater_uses_daikin_temperature_unit(
+    setpoint_unit: str | None,
+    sensory_unit: str | None,
+    expected_unit: UnitOfTemperature,
+) -> None:
+    """Use the reported setpoint or tank-sensor unit, defaulting to Celsius."""
+    device = DaikinOnectaDevice(_load_gateway_devices("altherma_boost")[0])
+    point = device.device.management_points_by_type("domesticHotWaterTank")[0]
+    setpoint = point.domestic_hot_water.temperature
+    tank_temperature = point.sensory_characteristic("tankTemperature")
+    assert setpoint is not None
+    assert tank_temperature is not None
+    setpoint.unit = setpoint_unit
+    tank_temperature.unit = sensory_unit
+
+    entity = DaikinWaterTank(device, MagicMock(), point.embedded_id)
+
+    assert entity.native_temperature_unit == expected_unit
+
+
+@pytest.mark.parametrize(
+    ("reported_unit", "expected_unit"),
+    [("°F", "°F"), (None, UnitOfTemperature.CELSIUS)],
+)
+def test_value_sensor_uses_daikin_unit(
+    reported_unit: str | None, expected_unit: str
+) -> None:
+    """Prefer Daikin's characteristic unit and retain the description fallback."""
+    device = DaikinOnectaDevice(_load_gateway_devices("altherma_boost")[0])
+    point = device.device.management_points_by_type("domesticHotWaterTank")[0]
+    characteristic = point.sensory_characteristic("tankTemperature")
+    assert characteristic is not None
+    characteristic.unit = reported_unit
+
+    entity = DaikinValueSensor(
+        device,
+        MagicMock(),
+        SENSOR_DESCRIPTIONS["tankTemperature"],
+        ValueSensorDetails(point.embedded_id, "sensoryData", "tankTemperature"),
+    )
+
+    assert entity.native_unit_of_measurement == expected_unit
+
+
+@pytest.mark.parametrize(
+    ("reported_unit", "expected_unit"),
+    [("MJ", "MJ"), (None, "kWh")],
+)
+def test_energy_sensor_uses_daikin_unit(
+    reported_unit: str | None, expected_unit: str
+) -> None:
+    """Prefer Daikin's energy-source unit and retain the description fallback."""
+    device = DaikinOnectaDevice(_load_gateway_devices("altherma")[0])
+    point = next(
+        point for point in device.device.management_points if point.energy_aggregates
+    )
+    aggregate = point.energy_aggregates[0]
+    energy_data = (
+        point.consumption
+        if aggregate.data_type == "consumption"
+        else point.energy_output
+    )
+    source = energy_data.source(aggregate.source)
+    assert source is not None
+    source.unit = reported_unit
+    description_key = (
+        f"{aggregate.operation_mode.capitalize()}Daily"
+        f"{aggregate.source.capitalize()}{aggregate.data_type.capitalize()}"
+    )
+    entity = DaikinEnergySensor(
+        device,
+        MagicMock(),
+        SENSOR_DESCRIPTIONS[description_key],
+        EnergySensorDetails(
+            point.embedded_id,
+            aggregate.source,
+            aggregate.operation_mode,
+            SENSOR_PERIOD_DAILY,
+            aggregate.data_type,
+        ),
+    )
+
+    assert entity.native_unit_of_measurement == expected_unit
+
+
 def test_water_heater_uses_standard_target_temperature_step() -> None:
     """Expose the Daikin setpoint increment through the standard capability."""
     device = DaikinOnectaDevice(_load_gateway_devices("altherma_boost")[0])
@@ -1107,6 +1202,7 @@ async def test_water_heater_publishes_successful_partial_operation_write() -> No
             return_value=SimpleNamespace(
                 domestic_hot_water=hot_water,
                 on_off_mode=power,
+                sensory_characteristic=MagicMock(return_value=None),
             )
         ),
     )

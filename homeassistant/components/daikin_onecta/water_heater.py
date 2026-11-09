@@ -68,13 +68,13 @@ class DaikinWaterTank(DaikinManagementPointEntity, WaterHeaterEntity):
     ) -> None:
         """Initialize the Water device."""
         super().__init__(device, coordinator, embedded_id)
-        self._attr_native_temperature_unit = UnitOfTemperature.CELSIUS
         self._attr_unique_id = f"{self._device.id}_{self._embedded_id}"
         self.update_state()
 
     def update_state(self) -> None:
         """Refresh all state attributes from the device."""
         self._attr_supported_features = self.get_supported_features()
+        self._attr_native_temperature_unit = self._get_native_temperature_unit()
         self._attr_native_current_temperature = self.get_current_temperature()
         self._attr_native_target_temperature = self.get_target_temperature()
         self._attr_min_temp = self.get_min_temp()
@@ -87,6 +87,22 @@ class DaikinWaterTank(DaikinManagementPointEntity, WaterHeaterEntity):
         )
         self._attr_operation_list = self.get_operation_list()
         self._attr_current_operation = self.get_current_operation()
+
+    def _get_native_temperature_unit(self) -> UnitOfTemperature:
+        """Return the Daikin temperature unit, defaulting to Celsius."""
+        setpoint = self.domestic_hotwater_temperature
+        unit = setpoint.unit if setpoint is not None else None
+        if unit is None:
+            point = self.hot_water_management_point
+            tank_temperature = (
+                point.sensory_characteristic("tankTemperature")
+                if point is not None
+                else None
+            )
+            unit = tank_temperature.unit if tank_temperature is not None else None
+        return (
+            UnitOfTemperature(unit) if unit is not None else UnitOfTemperature.CELSIUS
+        )
 
     @property
     @override
