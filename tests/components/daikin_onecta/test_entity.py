@@ -56,12 +56,14 @@ def test_device_info(
     device = MagicMock()
     device.id = "gateway-id"
     device.name = "Gateway name"
+    get_management_point = MagicMock(return_value=management_point)
     device.device = SimpleNamespace(
         mac_address=mac_address,
         device_model="Gateway model",
         gateway_embedded_id=embedded_id,
+        management_point=get_management_point,
     )
-    device.device.management_point = MagicMock(return_value=management_point)
+    device.management_point = get_management_point
     entity._device = device
 
     device_info = entity.device_info
@@ -75,6 +77,6 @@ def test_device_info(
     for key in {"model", "serial_number", "sw_version"} - expected.keys():
         assert key not in device_info
     if embedded_id is None:
-        device.device.management_point.assert_not_called()
+        device.management_point.assert_not_called()
     else:
-        device.device.management_point.assert_called_once_with(embedded_id)
+        device.management_point.assert_called_with(embedded_id)

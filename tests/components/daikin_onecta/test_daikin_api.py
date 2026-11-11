@@ -166,18 +166,19 @@ async def test_write_preserves_oauth_token_rejection(
         message="invalid_grant",
     )
 
-    async def token_provider() -> str:
-        raise token_error
-
-    api._client = OnectaClient(MagicMock(), token_provider)
+    session = MagicMock()
+    token_provider = AsyncMock(side_effect=token_error)
+    api._client = OnectaClient(session, token_provider)
 
     async def command(client: OnectaClient) -> None:
         await client.patch_characteristic("gateway", "zone", "temperatureControl", 21)
 
-    with pytest.raises(OAuth2TokenRequestReauthError) as err:
-        await api.async_execute_command(command)
+    with patch.object(config_entry, "async_start_reauth") as start_reauth:
+        assert not await api.async_execute_command(command)
 
-    assert err.value is token_error
+    start_reauth.assert_called_once_with(hass)
+    token_provider.assert_awaited_once_with()
+    session.request.assert_not_called()
     assert api.last_patch_call is None
 
 
