@@ -159,6 +159,57 @@ def test_create_climate_entities_deduplicates_targets_per_management_point() -> 
     ]
 
 
+def test_create_climate_entities_skips_management_points_without_climate_control() -> (
+    None
+):
+    """Skip management points that do not expose climate controls."""
+    management_point = SimpleNamespace(
+        embedded_id="zone",
+        climate_control=None,
+    )
+    device = MagicMock()
+    device.device.management_points_by_type.return_value = [management_point]
+
+    assert _create_climate_entities(device, MagicMock()) == []
+
+
+def test_get_hvac_mode_without_climate_control() -> None:
+    """Return an unknown HVAC mode when climate data is absent."""
+    entity = object.__new__(DaikinClimate)
+    entity._climate_control = MagicMock(return_value=None)
+
+    assert entity._get_hvac_mode() is None
+
+
+@pytest.mark.parametrize(
+    ("operation_mode", "settable", "expected"),
+    [
+        (None, True, None),
+        (SimpleNamespace(value="heating", values=["cooling"]), False, None),
+    ],
+)
+def test_native_hvac_mode_requires_writable_advertised_mode(
+    operation_mode: SimpleNamespace | None,
+    settable: bool,
+    expected: str | None,
+) -> None:
+    """Return no native mode when the characteristic is missing or read-only."""
+    entity = object.__new__(DaikinClimate)
+    entity._operation_mode = MagicMock(
+        return_value=(
+            None
+            if operation_mode is None
+            else SimpleNamespace(
+                value=operation_mode.value,
+                values=operation_mode.values,
+                settable=settable,
+            )
+        )
+    )
+
+    assert entity._native_hvac_mode(HVACMode.COOL) is expected
+
+
 @pytest.mark.parametrize(
     ("last_update_success", "device_available", "management_point_exists", "expected"),
     [
@@ -1284,6 +1335,20 @@ def test_preset_modes_require_writable_characteristics() -> None:
     assert entity._get_preset_modes() == [PRESET_NONE]
 
 
+def test_get_preset_mode_returns_enabled_away_preset() -> None:
+    """Recognize the enabled holiday characteristic as the away preset."""
+    entity = object.__new__(DaikinClimate)
+    entity._preset_characteristic = MagicMock(
+        side_effect=lambda characteristic: (
+            SimpleNamespace(value=SimpleNamespace(enabled=True))
+            if characteristic == "holidayMode"
+            else None
+        )
+    )
+
+    assert entity._get_preset_mode() == PRESET_AWAY
+
+
 async def test_set_preset_mode_publishes_successful_disable() -> None:
     """Publish a successful preset disable before a replacement fails."""
     entity = object.__new__(DaikinClimate)
@@ -1308,13 +1373,18 @@ async def test_set_preset_mode_publishes_successful_disable() -> None:
     coordinator.async_update_listeners.assert_called_once_with()
 
 
-@pytest.mark.parametrize("patch_result", [True, False])
+@pytest.mark.parametrize(
+    ("patch_result", "token_rejected"),
+    [(True, False), (False, False), (False, True)],
+)
 async def test_climate_service_updates_entity_state(
     hass: HomeAssistant,
     config_entry: MockConfigEntry,
     device_registry: dr.DeviceRegistry,
     entity_registry: er.EntityRegistry,
     patch_result: bool,
+    token_rejected: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test climate services through the Home Assistant integration API."""
     setpoint = SimpleNamespace(
@@ -1397,6 +1467,24 @@ async def test_climate_service_updates_entity_state(
     assert child_entry.parent_device_id == gateway_entry.id
     assert entity_registry.async_get(entity_id).device_id == child_entry.id
 
+    if token_rejected:
+        # Exercise the pinned library's real request contract and the climate
+        # adapter using a simulated API rejection.
+        monkeypatch.setattr(
+            DaikinClimate,
+            "_async_execute_climate_command",
+            _ACTUAL_ASYNC_EXECUTE_CLIMATE_COMMAND,
+        )
+        response = MagicMock(status=401, headers={})
+        response.text = AsyncMock(return_value="Unauthorized")
+        request_context = MagicMock()
+        request_context.__aenter__ = AsyncMock(return_value=response)
+        request_context.__aexit__ = AsyncMock(return_value=None)
+        session = MagicMock()
+        session.request = MagicMock(return_value=request_context)
+        coordinator.client._session = session
+        coordinator.client._token_provider = AsyncMock(return_value="test-token")
+
     service_call = hass.services.async_call(
         CLIMATE_DOMAIN,
         SERVICE_SET_TEMPERATURE,
@@ -1405,24 +1493,49 @@ async def test_climate_service_updates_entity_state(
     )
     if patch_result:
         await service_call
-        assert (
-            hass.states.get(entity_id).attributes[
-                ClimateEntityStateAttribute.TARGET_TEMPERATURE
-            ]
-            == 21
-        )
+        expected_temperature = 21
     else:
-        with pytest.raises(HomeAssistantError, match="Failed to set the temperature"):
+        with pytest.raises(HomeAssistantError) as err:
             await service_call
+        assert err.value.translation_domain == DOMAIN
+        assert err.value.translation_key == "set_temperature_failed"
+        assert str(err.value) == "Failed to set the temperature for Daikin"
+        expected_temperature = 20
 
-    device.patch.assert_awaited_once_with(
-        "gateway",
-        "zone",
-        "temperatureControl",
-        "/operationModes/heating/setpoints/roomTemperature",
-        21,
+    state = hass.states.get(entity_id)
+    assert state is not None
+    assert (
+        state.attributes[ClimateEntityStateAttribute.TARGET_TEMPERATURE]
+        == expected_temperature
     )
 
+    if token_rejected:
+        request = coordinator.client._session.request
+        request.assert_called_once()
+        assert request.call_args.args == (
+            "PATCH",
+            "https://api.onecta.daikineurope.com/v1/gateway-devices/gateway/"
+            "management-points/zone/characteristics/temperatureControl",
+        )
+        assert request.call_args.kwargs["headers"]["Authorization"] == (
+            "Bearer test-token"
+        )
+        assert request.call_args.kwargs["json"] == {
+            "value": 21,
+            "path": "/operationModes/heating/setpoints/roomTemperature",
+        }
+        device.patch.assert_not_awaited()
+        assert coordinator.last_patch_call is None
+    else:
+        device.patch.assert_awaited_once_with(
+            "gateway",
+            "zone",
+            "temperatureControl",
+            "/operationModes/heating/setpoints/roomTemperature",
+            21,
+        )
+
+    device.async_update_device_registry.reset_mock()
     coordinator.async_update_listeners()
 
 
@@ -1944,3 +2057,222 @@ def test_fan_modes_respect_writable_characteristics(
     )
     entity._fan_operation = MagicMock(return_value=fan)
     assert entity._get_fan_modes() == expected_modes
+
+
+@pytest.mark.parametrize(
+    ("current_mode", "fixed_value"),
+    [(None, 1), (FANMODE_FIXED, None)],
+)
+def test_get_fan_mode_handles_omitted_values(
+    current_mode: str | None, fixed_value: int | None
+) -> None:
+    """Do not turn omitted fan-mode data into a display string."""
+    entity = object.__new__(DaikinClimate)
+    modes = (
+        {FANMODE_FIXED: SimpleNamespace(value=fixed_value)}
+        if current_mode == FANMODE_FIXED
+        else {}
+    )
+    entity._fan_operation = MagicMock(
+        return_value=SimpleNamespace(
+            fan_speed=SimpleNamespace(
+                current_mode=SimpleNamespace(value=current_mode), modes=modes
+            )
+        )
+    )
+
+    assert entity._get_fan_mode() is None
+
+
+def _make_fan_command_entity(
+    fan_operation: SimpleNamespace,
+) -> DaikinClimate:
+    """Build a minimally initialized climate entity for fan command tests."""
+    entity = object.__new__(DaikinClimate)
+    device = MagicMock(id="gateway", name="Device")
+    object.__setattr__(entity, "_device", device)
+    object.__setattr__(entity, "_embedded_id", "zone")
+    entity.coordinator = MagicMock()
+    entity._fan_operation = MagicMock(return_value=fan_operation)
+    entity._climate_control = MagicMock(
+        return_value=SimpleNamespace(operation_mode=SimpleNamespace(value="heating"))
+    )
+    entity._get_fan_modes = MagicMock(return_value=["2", "quiet"])
+    entity._get_fan_mode = MagicMock(return_value="2")
+    entity._async_execute_climate_command = AsyncMock(return_value=True)
+    return entity
+
+
+def _fan_operation(
+    current_value: str, *, current_settable: bool = True, fixed_value: int = 1
+) -> SimpleNamespace:
+    """Create fan data with a writable fixed-speed control."""
+    return SimpleNamespace(
+        fan_speed=SimpleNamespace(
+            current_mode=SimpleNamespace(
+                value=current_value, settable=current_settable
+            ),
+            modes={FANMODE_FIXED: SimpleNamespace(value=fixed_value, settable=True)},
+        )
+    )
+
+
+async def test_set_fan_mode_rejects_fixed_speed_without_writable_control() -> None:
+    """Reject a numeric fan speed if its fixed-speed control is not writable."""
+    fan_operation = _fan_operation("auto")
+    fan_operation.fan_speed.modes[FANMODE_FIXED].settable = False
+    entity = _make_fan_command_entity(fan_operation)
+
+    with pytest.raises(ServiceValidationError) as err:
+        await entity.async_set_fan_mode("2")
+
+    assert err.value.translation_key == "fan_control_unavailable"
+    entity._async_execute_climate_command.assert_not_awaited()
+
+
+async def test_set_fan_mode_reports_failed_fixed_mode_write() -> None:
+    """Report when the cloud rejects switching to fixed fan mode."""
+    entity = _make_fan_command_entity(_fan_operation("auto"))
+    entity._async_execute_climate_command = AsyncMock(return_value=False)
+
+    with pytest.raises(HomeAssistantError) as err:
+        await entity.async_set_fan_mode("2")
+
+    assert err.value.translation_key == "set_fan_mode_failed"
+
+
+async def test_set_fan_mode_handles_disappearing_data_after_fixed_mode_write() -> None:
+    """Stop safely if a successful mode write is followed by missing state."""
+    entity = _make_fan_command_entity(_fan_operation("auto"))
+    entity._fan_operation = MagicMock(side_effect=[_fan_operation("auto"), None])
+
+    await entity.async_set_fan_mode("2")
+
+    entity._async_execute_climate_command.assert_awaited_once()
+
+
+async def test_set_fan_mode_handles_disappearing_data_after_speed_write() -> None:
+    """Stop safely if updated fan state disappears after setting its speed."""
+    entity = _make_fan_command_entity(_fan_operation("auto"))
+    entity._fan_operation = MagicMock(
+        side_effect=[_fan_operation("auto"), _fan_operation(FANMODE_FIXED), None]
+    )
+
+    await entity.async_set_fan_mode("2")
+
+    assert entity._async_execute_climate_command.await_count == 2
+
+
+async def test_set_fan_mode_handles_missing_fixed_speed_after_write() -> None:
+    """Stop safely if fixed-speed metadata disappears after the write."""
+    entity = _make_fan_command_entity(_fan_operation("auto"))
+    updated = _fan_operation(FANMODE_FIXED)
+    after_speed_write = _fan_operation(FANMODE_FIXED)
+    after_speed_write.fan_speed.modes = {}
+    entity._fan_operation = MagicMock(
+        side_effect=[_fan_operation("auto"), updated, after_speed_write]
+    )
+
+    await entity.async_set_fan_mode("2")
+
+    assert entity._async_execute_climate_command.await_count == 2
+
+
+async def test_set_fan_mode_rejects_read_only_current_mode() -> None:
+    """Reject a standard fan-mode write when the characteristic is read-only."""
+    entity = _make_fan_command_entity(
+        SimpleNamespace(
+            fan_speed=SimpleNamespace(
+                current_mode=SimpleNamespace(value="auto", settable=False), modes={}
+            )
+        )
+    )
+
+    with pytest.raises(ServiceValidationError) as err:
+        await entity.async_set_fan_mode("quiet")
+
+    assert err.value.translation_key == "fan_control_unavailable"
+    entity._async_execute_climate_command.assert_not_awaited()
+
+
+async def test_set_fan_mode_reports_failed_standard_mode_write() -> None:
+    """Report when the cloud rejects a standard fan-mode write."""
+    entity = _make_fan_command_entity(
+        SimpleNamespace(
+            fan_speed=SimpleNamespace(
+                current_mode=SimpleNamespace(value="auto", settable=True), modes={}
+            )
+        )
+    )
+    entity._async_execute_climate_command = AsyncMock(return_value=False)
+
+    with pytest.raises(HomeAssistantError) as err:
+        await entity.async_set_fan_mode("quiet")
+
+    assert err.value.translation_key == "set_fan_mode_failed"
+
+
+async def test_set_fan_mode_handles_disappearing_standard_mode_data() -> None:
+    """Stop safely if fan data disappears after a standard mode write."""
+    entity = _make_fan_command_entity(
+        SimpleNamespace(
+            fan_speed=SimpleNamespace(
+                current_mode=SimpleNamespace(value="auto", settable=True), modes={}
+            )
+        )
+    )
+    entity._fan_operation = MagicMock(
+        side_effect=[
+            SimpleNamespace(
+                fan_speed=SimpleNamespace(
+                    current_mode=SimpleNamespace(value="auto", settable=True),
+                    modes={},
+                )
+            ),
+            None,
+        ]
+    )
+
+    await entity.async_set_fan_mode("quiet")
+
+    entity._async_execute_climate_command.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("fan_operation", "climate_control"),
+    [
+        (None, None),
+        (SimpleNamespace(fan_direction=None), SimpleNamespace(operation_mode=None)),
+    ],
+)
+async def test_set_swing_returns_false_when_control_data_is_missing(
+    fan_operation: SimpleNamespace | None, climate_control: SimpleNamespace | None
+) -> None:
+    """Return false when swing controls or their operation mode are absent."""
+    entity = object.__new__(DaikinClimate)
+    entity._fan_operation = MagicMock(return_value=fan_operation)
+    entity._climate_control = MagicMock(return_value=climate_control)
+
+    assert not await entity._async_set_swing("vertical", SWING_ON)
+
+
+@pytest.mark.parametrize(
+    "axis",
+    [
+        None,
+        SimpleNamespace(current_mode=SimpleNamespace(settable=False, values=[])),
+    ],
+)
+async def test_set_swing_returns_false_when_axis_is_missing_or_read_only(
+    axis: SimpleNamespace | None,
+) -> None:
+    """Return false when the requested swing axis cannot be written."""
+    entity = object.__new__(DaikinClimate)
+    entity._fan_operation = MagicMock(
+        return_value=SimpleNamespace(fan_direction=SimpleNamespace(vertical=axis))
+    )
+    entity._climate_control = MagicMock(
+        return_value=SimpleNamespace(operation_mode=SimpleNamespace(value="heating"))
+    )
+
+    assert not await entity._async_set_swing("vertical", SWING_ON)
