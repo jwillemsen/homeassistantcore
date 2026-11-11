@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from copy import deepcopy
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from daikin_onecta.models import (
@@ -16,7 +17,10 @@ from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 
 from homeassistant.components.daikin_onecta import OnectaDataUpdateCoordinator
 from homeassistant.components.daikin_onecta.const import DOMAIN
-from homeassistant.components.daikin_onecta.discovery import gateway_entity_keys
+from homeassistant.components.daikin_onecta.discovery import (
+    gateway_entity_keys,
+    management_point_entity_keys,
+)
 from homeassistant.components.daikin_onecta.entity_descriptions import (
     BINARY_SENSOR_DESCRIPTIONS,
     SENSOR_DESCRIPTIONS,
@@ -29,6 +33,29 @@ from homeassistant.helpers import entity_registry as er
 
 from .conftest import FAKE_ACCESS_TOKEN
 from .test_climate_snapshots import _async_setup_fixture, _load_gateway_devices
+
+
+def test_discovery_skips_unknown_energy_period() -> None:
+    """Ignore energy windows the integration does not expose yet."""
+    point = SimpleNamespace(
+        climate_control=None,
+        domestic_hot_water=None,
+        air_purification=None,
+        schedule_state=None,
+        firmware=None,
+        scalar_characteristics=dict,
+        sensory_characteristic=lambda _name: None,
+        energy_aggregates=[
+            SimpleNamespace(
+                period="quarter",
+                operation_mode="heating",
+                source="electrical",
+                data_type="consumption",
+            )
+        ],
+    )
+
+    assert management_point_entity_keys(point) == set()
 
 
 async def _async_fire_coordinator_update(

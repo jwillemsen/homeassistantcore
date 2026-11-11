@@ -1,13 +1,19 @@
 """Tests for the Daikin Onecta base entity."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from homeassistant.components.daikin_onecta.const import DOMAIN
-from homeassistant.components.daikin_onecta.entity import DaikinOnectaEntity
-from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
+from homeassistant.components.daikin_onecta.entity import (
+    DaikinEntity,
+    DaikinManagementPointEntity,
+    DaikinOnectaEntity,
+    _add_management_point_metadata,
+)
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 
 
 @pytest.mark.parametrize(
@@ -80,3 +86,49 @@ def test_device_info(
         device.management_point.assert_not_called()
     else:
         device.management_point.assert_called_with(embedded_id)
+
+
+def test_add_management_point_metadata_handles_missing_point() -> None:
+    """Leave gateway metadata unchanged when the point disappeared."""
+    info = DeviceInfo(identifiers={(DOMAIN, "gateway-id")})
+    device = MagicMock()
+    device.management_point.return_value = None
+
+    _add_management_point_metadata(info, device, "point")
+
+    assert info == DeviceInfo(identifiers={(DOMAIN, "gateway-id")})
+    device.management_point.assert_called_once_with("point")
+
+
+async def test_execute_command_raises_when_command_is_rejected() -> None:
+    """Raise the translated HA error when the coordinator rejects a write."""
+    entity = object.__new__(DaikinEntity)
+    entity._device = SimpleNamespace(name="Gateway")
+    entity.coordinator = SimpleNamespace(
+        async_execute_command=AsyncMock(return_value=False)
+    )
+
+    with pytest.raises(HomeAssistantError) as err:
+        await entity._async_execute_command(AsyncMock(), "command_failed")
+
+    assert err.value.translation_key == "command_failed"
+
+
+def test_management_point_device_info_falls_back_to_gateway() -> None:
+    """Use gateway registry information when the management point has no type."""
+    entity = object.__new__(DaikinManagementPointEntity)
+    entity._management_point_type = None
+    entity._device = SimpleNamespace(
+        id="gateway-id",
+        name="Gateway",
+        device=SimpleNamespace(
+            mac_address=None,
+            device_model="Gateway model",
+            gateway_embedded_id=None,
+        ),
+    )
+
+    info = entity.device_info
+
+    assert info["identifiers"] == {(DOMAIN, "gateway-id")}
+    assert info["name"] == "Gateway"

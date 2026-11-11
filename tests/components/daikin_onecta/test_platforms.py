@@ -196,6 +196,14 @@ def test_platform_availability_requires_coordinator_and_device(
     assert entity.available is expected
 
 
+def test_device_exposes_gateway_embedded_id() -> None:
+    """Expose the gateway management point ID from the device wrapper."""
+    gateway = _load_gateway_devices("altherma")[0]
+    device = DaikinOnectaDevice(gateway)
+
+    assert device.gateway_embedded_id == gateway.gateway_embedded_id
+
+
 @pytest.mark.parametrize(
     "entity_class",
     [
