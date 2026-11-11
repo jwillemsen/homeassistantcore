@@ -45,9 +45,11 @@ from homeassistant.components.daikin_onecta.fan import DaikinAirPurifier
 from homeassistant.components.daikin_onecta.select import DaikinScheduleSelect
 from homeassistant.components.daikin_onecta.sensor import (
     DaikinEnergySensor,
+    DaikinLimitSensor,
     DaikinValueSensor,
     EnergySensorDetails,
     ValueSensorDetails,
+    _native_unit,
     add_energy_sensors,
 )
 from homeassistant.components.daikin_onecta.switch import (
@@ -1827,3 +1829,306 @@ async def test_unknown_characteristics_are_skipped(
     await setup_platform(MagicMock(), config_entry, async_add_entities)
 
     async_add_entities.assert_called_once_with([])
+
+
+@pytest.mark.parametrize(
+    ("mode", "fixed", "expected"),
+    [
+        ("missing", None, []),
+        ("read_only", SimpleNamespace(settable=False), []),
+        (
+            "missing_bounds",
+            SimpleNamespace(settable=True, min_value=1, max_value=None, step_value=1),
+            [],
+        ),
+        (
+            "missing_step",
+            SimpleNamespace(settable=True, min_value=1, max_value=3, step_value=None),
+            [],
+        ),
+        (
+            "invalid_step",
+            SimpleNamespace(settable=True, min_value=1, max_value=3, step_value=0),
+            [],
+        ),
+        (
+            "fractional_bounds",
+            SimpleNamespace(settable=True, min_value=1.5, max_value=3, step_value=1),
+            [],
+        ),
+        (
+            "fractional_step",
+            SimpleNamespace(settable=True, min_value=1, max_value=3, step_value=0.5),
+            [],
+        ),
+        (
+            "valid",
+            SimpleNamespace(settable=True, min_value=1, max_value=5, step_value=2),
+            [1, 3, 5],
+        ),
+    ],
+)
+def test_air_purifier_fixed_speeds(
+    mode: str, fixed: object, expected: list[int]
+) -> None:
+    """Only expose integral, writable fixed speeds."""
+    entity = object.__new__(DaikinAirPurifier)
+    operation = SimpleNamespace(
+        fan_speed=SimpleNamespace(modes={FANMODE_FIXED: fixed} if fixed else None)
+    )
+    purification = SimpleNamespace(
+        fan_operation=MagicMock(return_value=operation if mode != "missing" else None)
+    )
+    entity._air_purification = MagicMock(return_value=purification)
+
+    assert entity._fixed_speeds() == expected
+    assert entity._fixed_speed_count() == (len(expected) or None)
+
+
+async def test_air_purifier_turn_on_applies_optional_controls() -> None:
+    """Apply requested preset and speed after an already-on power state."""
+    entity = object.__new__(DaikinAirPurifier)
+    entity._air_purification = MagicMock(
+        return_value=SimpleNamespace(power=SimpleNamespace(value="on", settable=True))
+    )
+    entity.async_set_preset_mode = AsyncMock()
+    entity.async_set_percentage = AsyncMock()
+
+    await entity.async_turn_on(percentage=65, preset_mode="autoFan")
+
+    entity.async_set_preset_mode.assert_awaited_once_with("autoFan")
+    entity.async_set_percentage.assert_awaited_once_with(65)
+
+
+async def test_air_purifier_turn_off_is_noop_when_already_off() -> None:
+    """Avoid a cloud write when the purifier is already off."""
+    entity = object.__new__(DaikinAirPurifier)
+    entity._air_purification = MagicMock(
+        return_value=SimpleNamespace(power=SimpleNamespace(value="off", settable=True))
+    )
+    entity._async_execute_air_purification_command = AsyncMock()
+
+    await entity.async_turn_off()
+
+    entity._async_execute_air_purification_command.assert_not_awaited()
+
+
+async def test_air_purifier_zero_percentage_turns_off() -> None:
+    """Map zero fan percentage to the fan turn-off operation."""
+    entity = object.__new__(DaikinAirPurifier)
+    entity.async_turn_off = AsyncMock()
+
+    await entity.async_set_percentage(0)
+
+    entity.async_turn_off.assert_awaited_once_with()
+
+
+async def test_air_purifier_percentage_rejects_missing_speed_after_mode_change() -> (
+    None
+):
+    """Reject a speed command if selecting manual mode removes the mode data."""
+    entity = object.__new__(DaikinAirPurifier)
+    mode = SimpleNamespace(value="autoFan", settable=True)
+    purification = SimpleNamespace(
+        mode=mode,
+        modes=["autoFan", "manualFan"],
+        power=SimpleNamespace(value="on", settable=True),
+    )
+    entity._air_purification = MagicMock(side_effect=[purification, purification, None])
+    entity._fixed_speeds = MagicMock(return_value=[1, 2, 3])
+    entity._async_set_mode = AsyncMock()
+    entity._attr_is_on = True
+    entity._device = SimpleNamespace(name="Purifier")
+
+    with pytest.raises(ServiceValidationError) as err:
+        await entity.async_set_percentage(50)
+
+    assert err.value.translation_key == "air_purifier_speed_unavailable"
+
+
+async def test_air_purifier_percentage_rejects_unsupported_fixed_speeds() -> None:
+    """Reject a manual-mode request when Daikin exposes no writable speeds."""
+    entity = object.__new__(DaikinAirPurifier)
+    purification = SimpleNamespace(
+        mode=SimpleNamespace(value="manualFan", settable=True),
+        power=SimpleNamespace(value="on", settable=True),
+    )
+    entity._air_purification = MagicMock(return_value=purification)
+    entity._fixed_speeds = MagicMock(return_value=[])
+    entity._device = SimpleNamespace(name="Purifier")
+
+    with pytest.raises(ServiceValidationError) as err:
+        await entity.async_set_percentage(50)
+
+    assert err.value.translation_key == "air_purifier_speed_unavailable"
+
+
+@pytest.mark.parametrize(
+    ("unit", "description", "expected"),
+    [
+        ("not-a-unit", SENSOR_DESCRIPTIONS["roomTemperature"], "not-a-unit"),
+        (
+            "not-a-unit",
+            SENSOR_DESCRIPTIONS["HeatingDailyElectricalConsumption"],
+            "not-a-unit",
+        ),
+    ],
+)
+def test_sensor_preserves_unknown_native_unit(
+    unit: str, description, expected: str
+) -> None:
+    """Pass through Daikin unit strings that HA does not recognize."""
+    assert _native_unit(unit, description) == expected
+
+
+def test_energy_sensor_value_when_management_point_is_missing() -> None:
+    """Return no energy value after its source point disappears."""
+    entity = object.__new__(DaikinEnergySensor)
+    entity._device = SimpleNamespace(management_point=lambda _: None)
+    entity._embedded_id = "point"
+    entity._period = SENSOR_PERIOD_DAILY
+    entity._datatype = "consumption"
+    entity._sensor_type = "electrical"
+    entity._operation_mode = "heating"
+
+    assert entity.sensor_value() is None
+
+
+def test_value_sensor_value_when_management_point_is_missing() -> None:
+    """Return no scalar value after its source point disappears."""
+    entity = object.__new__(DaikinValueSensor)
+    entity._device = SimpleNamespace(management_point=lambda _: None)
+    entity._embedded_id = "point"
+    entity._sub_type = None
+    entity._value = "roomTemperature"
+
+    assert entity.sensor_value() is None
+
+
+def test_value_sensor_unavailable_when_point_disappears_between_checks() -> None:
+    """Handle a point disappearing while availability is being evaluated."""
+    entity = object.__new__(DaikinValueSensor)
+    entity.coordinator = SimpleNamespace(last_update_success=True)
+    entity._embedded_id = "point"
+    entity._sub_type = None
+    entity._value = "roomTemperature"
+    entity._device = SimpleNamespace(
+        available=True,
+        management_point=MagicMock(side_effect=[SimpleNamespace(), None]),
+    )
+
+    assert not entity.available
+
+
+def test_limit_sensor_updates_on_coordinator_refresh() -> None:
+    """Refresh and publish the account-level rate-limit sensor value."""
+    entity = object.__new__(DaikinLimitSensor)
+    entity.coordinator = SimpleNamespace(rate_limits={"remaining_day": 123})
+    entity._limit_key = "remaining_day"
+    entity.async_write_ha_state = MagicMock()
+
+    entity._handle_coordinator_update()
+
+    assert entity.native_value == 123
+    entity.async_write_ha_state.assert_called_once_with()
+
+
+async def test_switch_setup_skips_builtin_power_controls() -> None:
+    """Keep climate and water-heater power controls on their native platforms."""
+    management_point = SimpleNamespace(
+        embedded_id="point",
+        management_point_type="climateControl",
+        scalar_characteristics=lambda: {
+            "onOffMode": Characteristic(
+                value="on", settable=True, values=["on", "off"]
+            ),
+            "powerfulMode": Characteristic(
+                value="off", settable=True, values=["on", "off"]
+            ),
+        },
+    )
+    device = SimpleNamespace(
+        device=SimpleNamespace(management_points=[management_point])
+    )
+    config_entry = SimpleNamespace(
+        runtime_data=SimpleNamespace(data={"gateway": device})
+    )
+    async_add_entities = MagicMock()
+
+    with patch(
+        "homeassistant.components.daikin_onecta.switch.SWITCH_DESCRIPTIONS",
+        {"onOffMode": MagicMock(), "powerfulMode": MagicMock()},
+    ):
+        await async_setup_switches(MagicMock(), config_entry, async_add_entities)
+
+    async_add_entities.assert_called_once_with([])
+
+
+def test_firmware_state_clears_when_firmware_disappears() -> None:
+    """Clear stale update state when a gateway stops reporting firmware data."""
+    entity = object.__new__(DaikinFirmwareUpdateEntity)
+    entity._pending_install = (1, "1.0", 4)
+    entity._attr_installed_version = "1.0"
+    entity._attr_latest_version = "2.0"
+    entity._attr_release_url = "https://example.invalid/release"
+    entity._attr_release_summary = "Update"
+    entity._firmware_id = "firmware-id"
+    entity._attr_in_progress = True
+    entity._is_update_supported = True
+    entity._attr_supported_features = (
+        UpdateEntityFeature.INSTALL | UpdateEntityFeature.PROGRESS
+    )
+    entity._attr_extra_state_attributes = {"firmware_update_type": "major"}
+
+    entity._update_from_management_point(SimpleNamespace(firmware=None))
+
+    assert entity._pending_install is None
+    assert entity.installed_version is None
+    assert entity.latest_version is None
+    assert entity.release_url is None
+    assert entity.release_summary is None
+    assert entity.in_progress is False
+    assert not entity._is_update_supported
+    assert entity.supported_features == UpdateEntityFeature(0)
+    assert entity.extra_state_attributes == {}
+
+
+@pytest.mark.parametrize(
+    ("current", "requested", "expected"),
+    [
+        (STATE_HEAT_PUMP, STATE_OFF, ("off", "")),
+        (STATE_OFF, STATE_PERFORMANCE, ("on", "on")),
+        (STATE_PERFORMANCE, STATE_HEAT_PUMP, ("", "off")),
+        (STATE_HEAT_PUMP, STATE_HEAT_PUMP, ("", "")),
+    ],
+)
+def test_water_heater_requested_modes(
+    current: str, requested: str, expected: tuple[str, str]
+) -> None:
+    """Calculate only the native power and boost changes required."""
+    entity = object.__new__(DaikinWaterTank)
+    entity._attr_current_operation = current
+
+    assert entity._requested_modes(requested) == expected
+
+
+async def test_water_heater_publishes_successful_powerful_mode_write() -> None:
+    """Publish a successful boost change to sibling entities."""
+    entity = object.__new__(DaikinWaterTank)
+    powerful_mode = SimpleNamespace(value="off", settable=True)
+    hot_water = SimpleNamespace(
+        power=SimpleNamespace(value="on", settable=True),
+        powerful_mode=powerful_mode,
+    )
+    point = SimpleNamespace(domestic_hot_water=hot_water)
+    entity._device = SimpleNamespace(management_point=lambda _: point)
+    entity._embedded_id = "tank"
+    entity._attr_current_operation = STATE_HEAT_PUMP
+    entity._attr_operation_list = [STATE_HEAT_PUMP, STATE_PERFORMANCE]
+    entity._async_execute_hot_water_command = AsyncMock()
+    entity._publish_write_update = MagicMock()
+
+    await entity.async_set_operation_mode(STATE_PERFORMANCE)
+
+    assert powerful_mode.value == "on"
+    entity._publish_write_update.assert_called_once_with()
