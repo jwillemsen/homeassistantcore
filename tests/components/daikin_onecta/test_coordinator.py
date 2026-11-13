@@ -847,6 +847,22 @@ class TestOnectaDataUpdateCoordinator:
         assert exc_info.value.translation_key == "authentication_failed"
         assert exc_info.value.__cause__ is token_error
 
+    async def test_transient_token_refresh_error_is_retried(self, coordinator):
+        """Preserve transient OAuth token errors so the coordinator retries."""
+        coordinator._last_patch_call = None
+        token_error = OAuth2TokenRequestError(
+            domain=DOMAIN,
+            request_info=MagicMock(),
+            status=500,
+            message="server error",
+        )
+        coordinator._async_get_cloud_devices = AsyncMock(side_effect=token_error)
+
+        with pytest.raises(OAuth2TokenRequestError) as exc_info:
+            await coordinator._async_update_data_from_cloud()
+
+        assert exc_info.value is token_error
+
     async def test_post_write_cooldown_is_checked_under_cloud_lock(self, coordinator):
         """Keep cached data when a write completes while polling waits for the lock."""
         coordinator._last_patch_call = None
