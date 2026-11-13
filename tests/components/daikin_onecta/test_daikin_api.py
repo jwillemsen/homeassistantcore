@@ -10,6 +10,7 @@ from daikin_onecta import (
     OnectaClient,
     OnectaConnectionError,
     OnectaRateLimitError,
+    Site,
 )
 from daikin_onecta.rate_limit import RateLimit
 import pytest
@@ -75,6 +76,16 @@ async def test_get_device_details_rate_limit(
         await api._async_get_cloud_devices()
 
 
+async def test_get_sites(hass: HomeAssistant, config_entry: MockConfigEntry) -> None:
+    """Fetch sites without using the normal polling endpoint."""
+    api = OnectaDataUpdateCoordinator(hass, config_entry, MagicMock())
+    sites = [Site(id="site-1", gateway_device_ids=["gateway-1"])]
+    api.client.get_sites = AsyncMock(return_value=sites)
+
+    assert await api.async_get_sites() == sites
+    api.client.get_sites.assert_awaited_once_with()
+
+
 async def test_get_device_details_respects_cooldown(
     hass: HomeAssistant,
     config_entry: MockConfigEntry,
@@ -124,18 +135,20 @@ async def test_write_authentication_error(
     config_entry: MockConfigEntry,
     status: int,
 ) -> None:
-    """Use translated action errors without starting an unsupported reauth flow."""
+    """Start reauthentication and use the platform's translated write failure."""
     api = OnectaDataUpdateCoordinator(hass, config_entry, MagicMock())
     command = AsyncMock(
         side_effect=OnectaAuthenticationError(
-            status=status, method="PATCH", path="/v1/management-points/point"
+            status=status,
+            method="PATCH",
+            path="/v1/management-points/point",
         )
     )
 
     with patch.object(config_entry, "async_start_reauth") as start_reauth:
         assert not await api.async_execute_command(command)
 
-    start_reauth.assert_not_called()
+    start_reauth.assert_called_once_with(hass)
     assert api.last_patch_call is None
 
 
@@ -153,18 +166,19 @@ async def test_write_preserves_oauth_token_rejection(
         message="invalid_grant",
     )
 
-    async def token_provider() -> str:
-        raise token_error
-
-    api._client = OnectaClient(MagicMock(), token_provider)
+    session = MagicMock()
+    token_provider = AsyncMock(side_effect=token_error)
+    api._client = OnectaClient(session, token_provider)
 
     async def command(client: OnectaClient) -> None:
         await client.patch_characteristic("gateway", "zone", "temperatureControl", 21)
 
-    with pytest.raises(OAuth2TokenRequestReauthError) as err:
-        await api.async_execute_command(command)
+    with patch.object(config_entry, "async_start_reauth") as start_reauth:
+        assert not await api.async_execute_command(command)
 
-    assert err.value is token_error
+    start_reauth.assert_called_once_with(hass)
+    token_provider.assert_awaited_once_with()
+    session.request.assert_not_called()
     assert api.last_patch_call is None
 
 
@@ -259,3 +273,20 @@ async def test_unknown_rate_limit_uses_default_polling_budget(
         timedelta(seconds=594),
         timedelta(seconds=1782),
     )
+
+
+async def test_rate_limits_preserve_unknown_values(
+    hass: HomeAssistant, config_entry: MockConfigEntry
+) -> None:
+    """Keep rate-limit values unavailable when Daikin did not send them."""
+    coordinator = OnectaDataUpdateCoordinator(hass, config_entry, MagicMock())
+    coordinator.client.rate_limit = RateLimit()
+
+    assert coordinator.rate_limits == {
+        "minute": None,
+        "day": None,
+        "remaining_minutes": None,
+        "remaining_day": None,
+        "retry_after": None,
+        "ratelimit_reset": None,
+    }

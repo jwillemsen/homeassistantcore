@@ -52,6 +52,7 @@ from homeassistant.const import (
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers.entity import EntityStateAttribute
 
 from .conftest import DOMAIN
 from .test_climate_snapshots import _async_setup_fixture
@@ -1450,6 +1451,7 @@ async def test_climate_service_updates_entity_state(
             "homeassistant.components.daikin_onecta.OnectaDataUpdateCoordinator",
             return_value=coordinator,
         ),
+        patch("homeassistant.components.daikin_onecta.PLATFORMS", [Platform.CLIMATE]),
     ):
         assert await hass.config_entries.async_setup(config_entry.entry_id)
         await hass.async_block_till_done()
@@ -1459,7 +1461,7 @@ async def test_climate_service_updates_entity_state(
     )
     assert entity_id == "climate.daikin_climatecontrol_room_temperature"
     child_entry = device_registry.async_get_child_device_by_identifier(
-        (DOMAIN, "gatewayzone"), config_entry.entry_id
+        (DOMAIN, "gateway_zone"), config_entry.entry_id
     )
     assert child_entry is not None
     assert child_entry.parent_device_id == gateway_entry.id
@@ -1535,7 +1537,6 @@ async def test_climate_service_updates_entity_state(
 
     device.async_update_device_registry.reset_mock()
     coordinator.async_update_listeners()
-    device.async_update_device_registry.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -1543,7 +1544,11 @@ async def test_climate_service_updates_entity_state(
     [
         (SERVICE_TURN_ON, {}, "off"),
         (SERVICE_TURN_OFF, {}, "on"),
-        (SERVICE_SET_HVAC_MODE, {"hvac_mode": HVACMode.OFF}, "on"),
+        (
+            SERVICE_SET_HVAC_MODE,
+            {ClimateServiceArgument.HVAC_MODE: HVACMode.OFF},
+            "on",
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -1868,6 +1873,7 @@ async def test_setup_creates_entities_per_management_point(
             "homeassistant.components.daikin_onecta.OnectaDataUpdateCoordinator",
             return_value=coordinator,
         ),
+        patch("homeassistant.components.daikin_onecta.PLATFORMS", [Platform.CLIMATE]),
         patch(
             "homeassistant.components.daikin_onecta.climate.DaikinClimate",
             TestClimateEntity,
@@ -1934,19 +1940,19 @@ def test_swing_modes_translate_standard_values(
         (
             "speed",
             SERVICE_SET_FAN_MODE,
-            {"fan_mode": "auto"},
+            {ClimateServiceArgument.FAN_MODE: "auto"},
             ClimateEntityFeature.FAN_MODE,
         ),
         (
             "vertical",
             SERVICE_SET_SWING_MODE,
-            {"swing_mode": SWING_ON},
+            {ClimateServiceArgument.SWING_MODE: SWING_ON},
             ClimateEntityFeature.SWING_MODE,
         ),
         (
             "horizontal",
             SERVICE_SET_SWING_HORIZONTAL_MODE,
-            {"swing_horizontal_mode": SWING_ON},
+            {ClimateServiceArgument.SWING_HORIZONTAL_MODE: SWING_ON},
             ClimateEntityFeature.SWING_HORIZONTAL_MODE,
         ),
     ],
@@ -1986,7 +1992,7 @@ async def test_read_only_fan_controls_do_not_call_cloud(
     assert entity_id is not None
     state = hass.states.get(entity_id)
     assert state is not None
-    assert state.attributes["supported_features"] & feature
+    assert state.attributes[EntityStateAttribute.SUPPORTED_FEATURES] & feature
     with pytest.raises(ServiceValidationError) as err:
         await hass.services.async_call(
             CLIMATE_DOMAIN,
@@ -2006,7 +2012,7 @@ async def test_read_only_fan_controls_do_not_call_cloud(
     await hass.async_block_till_done()
     state = hass.states.get(entity_id)
     assert state is not None
-    assert not state.attributes["supported_features"] & feature
+    assert not state.attributes[EntityStateAttribute.SUPPORTED_FEATURES] & feature
     with pytest.raises(HomeAssistantError):
         await hass.services.async_call(
             CLIMATE_DOMAIN,

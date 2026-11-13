@@ -1,10 +1,12 @@
 """Snapshot tests for Daikin Onecta climate entities."""
 
+from datetime import UTC, datetime
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from daikin_onecta.models import GatewayDevice
+from freezegun.api import FrozenDateTimeFactory
 import pytest
 from pytest_homeassistant.common import MockConfigEntry
 from pytest_homeassistant.syrupy import HomeAssistantSnapshotExtension
@@ -13,9 +15,10 @@ from syrupy.extensions.single_file import SingleFileAmberSnapshotExtension
 from syrupy.location import PyTestLocation
 
 from homeassistant.components.climate import (
-    ATTR_FAN_MODE,
     DOMAIN as CLIMATE_DOMAIN,
     SERVICE_SET_HVAC_MODE,
+    ClimateEntityStateAttribute,
+    ClimateServiceArgument,
     HVACMode,
 )
 from homeassistant.core import HomeAssistant
@@ -122,6 +125,32 @@ async def test_climate_entities(
     )
 
 
+@pytest.mark.parametrize("fixture", FIXTURES)
+async def test_all_platform_entities(
+    hass: HomeAssistant,
+    config_entry: MockConfigEntry,
+    entity_registry: er.EntityRegistry,
+    snapshot: SnapshotAssertion,
+    freezer: FrozenDateTimeFactory,
+    fixture: str,
+) -> None:
+    """Snapshot all entities from each archived Daikin cloud response."""
+    freezer.move_to(datetime(2026, 10, 15, 12, tzinfo=UTC))
+    await _async_setup_fixture(hass, config_entry, fixture)
+
+    entities = {}
+    for entry in er.async_entries_for_config_entry(
+        entity_registry, config_entry.entry_id
+    ):
+        state = hass.states.get(entry.entity_id)
+        assert (state is None) == (entry.disabled_by is not None)
+        entities[entry.entity_id] = {"entry": entry, "state": state}
+
+    assert entities == snapshot(
+        name=fixture, extension_class=SingleFileHomeAssistantSnapshotExtension
+    )
+
+
 async def test_fan_mode_changes_with_hvac_mode(
     hass: HomeAssistant, config_entry: MockConfigEntry
 ) -> None:
@@ -135,25 +164,25 @@ async def test_fan_mode_changes_with_hvac_mode(
         SERVICE_SET_HVAC_MODE,
         {
             "entity_id": "climate.sala_climatecontrol_room_temperature",
-            "hvac_mode": HVACMode.COOL,
+            ClimateServiceArgument.HVAC_MODE: HVACMode.COOL,
         },
         blocking=True,
     )
     state = hass.states.get("climate.sala_climatecontrol_room_temperature")
     assert state is not None
     assert state.state == HVACMode.COOL
-    assert state.attributes[ATTR_FAN_MODE] == "3"
+    assert state.attributes[ClimateEntityStateAttribute.FAN_MODE] == "3"
 
     await hass.services.async_call(
         CLIMATE_DOMAIN,
         SERVICE_SET_HVAC_MODE,
         {
             "entity_id": "climate.sala_climatecontrol_room_temperature",
-            "hvac_mode": HVACMode.DRY,
+            ClimateServiceArgument.HVAC_MODE: HVACMode.DRY,
         },
         blocking=True,
     )
     state = hass.states.get("climate.sala_climatecontrol_room_temperature")
     assert state is not None
     assert state.state == HVACMode.DRY
-    assert state.attributes[ATTR_FAN_MODE] == "auto"
+    assert state.attributes[ClimateEntityStateAttribute.FAN_MODE] == "auto"

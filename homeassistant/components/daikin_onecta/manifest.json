@@ -2,7 +2,11 @@
   "domain": "daikin_onecta",
   "name": "Daikin Onecta",
   "after_dependencies": ["zeroconf"],
-  "categories": ["climate.heat_pumps_air_conditioning"],
+  "categories": [
+    "climate.air_purifiers_humidifiers",
+    "climate.heat_pumps_air_conditioning",
+    "climate.water_heaters"
+  ],
   "codeowners": ["@jwillemsen"],
   "config_flow": true,
   "connectivity": ["cloud"],
