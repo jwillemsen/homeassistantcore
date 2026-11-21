@@ -1,10 +1,10 @@
 """Snapshot tests for Daikin Onecta climate entities."""
 
-import json
+from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
-from daikin_onecta.models import GatewayDevice
+from freezegun.api import FrozenDateTimeFactory
 import pytest
 from pytest_homeassistant.common import MockConfigEntry
 from pytest_homeassistant.syrupy import HomeAssistantSnapshotExtension
@@ -13,26 +13,30 @@ from syrupy.extensions.single_file import SingleFileAmberSnapshotExtension
 from syrupy.location import PyTestLocation
 
 from homeassistant.components.climate import (
-    ATTR_FAN_MODE,
     DOMAIN as CLIMATE_DOMAIN,
     SERVICE_SET_HVAC_MODE,
+    ClimateEntityStateAttribute,
+    ClimateServiceArgument,
     HVACMode,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 
-from .conftest import FAKE_ACCESS_TOKEN
+from .platform_helpers import _async_setup_fixture
 
-FIXTURE_PATH = Path(__file__).parent / "fixtures"
 CLIMATE_ENTITY_ID = "climate.test_office_room_temperature"
 
 FIXTURES = (
     "altherma",
     "altherma3m",
     "altherma_boost",
+    "altherma_firmwareupdate",
+    "altherma_schedule",
     "climate_fixedfanmode",
     "climate_floorheatingairflow",
     "dry",
+    "dry2",
+    "dx4_firmwareavailable",
     "fanmode",
     "gas",
     "holidaymode",
@@ -42,6 +46,7 @@ FIXTURES = (
     "nomodel_id",
     "offlinedevice",
     "skyair",
+    "schedule",
     "ururu",
 )
 
@@ -59,60 +64,28 @@ class SingleFileHomeAssistantSnapshotExtension(
         )
 
 
-def _load_gateway_devices(fixture: str) -> list[GatewayDevice]:
-    """Load gateway devices from an archived cloud response."""
-    fixture_data = json.loads((FIXTURE_PATH / f"{fixture}.json").read_text())
-    return [GatewayDevice.from_dict(device) for device in fixture_data]
-
-
-async def _async_setup_fixture(
-    hass: HomeAssistant, config_entry: MockConfigEntry, fixture: str
-) -> None:
-    """Set up the integration using an archived cloud response."""
-    gateway_devices = _load_gateway_devices(fixture)
-
-    with (
-        patch(
-            "homeassistant.helpers.config_entry_oauth2_flow."
-            "async_get_config_entry_implementation",
-            return_value=MagicMock(),
-        ),
-        patch(
-            "homeassistant.components.daikin_onecta.OnectaDataUpdateCoordinator.async_get_access_token",
-            new=AsyncMock(return_value=FAKE_ACCESS_TOKEN),
-        ),
-        patch(
-            "homeassistant.components.daikin_onecta.coordinator."
-            "OnectaClient.get_gateway_devices",
-            new=AsyncMock(return_value=gateway_devices),
-        ),
-    ):
-        assert await hass.config_entries.async_setup(config_entry.entry_id)
-        await hass.async_block_till_done()
-
-
 @pytest.mark.parametrize("fixture", FIXTURES)
-async def test_climate_entities(
+async def test_all_platform_entities(
     hass: HomeAssistant,
     config_entry: MockConfigEntry,
     entity_registry: er.EntityRegistry,
     snapshot: SnapshotAssertion,
+    freezer: FrozenDateTimeFactory,
     fixture: str,
 ) -> None:
-    """Snapshot climate entities for archived Daikin cloud responses."""
+    """Snapshot all entities from each archived Daikin cloud response."""
+    freezer.move_to(datetime(2026, 10, 15, 12, tzinfo=UTC))
     await _async_setup_fixture(hass, config_entry, fixture)
 
-    climate_entities = {}
+    entities = {}
     for entry in er.async_entries_for_config_entry(
         entity_registry, config_entry.entry_id
     ):
-        if entry.domain != CLIMATE_DOMAIN:
-            continue
         state = hass.states.get(entry.entity_id)
-        assert state is not None
-        climate_entities[entry.entity_id] = {"entry": entry, "state": state}
+        assert (state is None) == (entry.disabled_by is not None)
+        entities[entry.entity_id] = {"entry": entry, "state": state}
 
-    assert climate_entities == snapshot(
+    assert entities == snapshot(
         name=fixture, extension_class=SingleFileHomeAssistantSnapshotExtension
     )
 
@@ -131,25 +104,25 @@ async def test_fan_mode_changes_with_hvac_mode(
         SERVICE_SET_HVAC_MODE,
         {
             "entity_id": entity_id,
-            "hvac_mode": HVACMode.COOL,
+            ClimateServiceArgument.HVAC_MODE: HVACMode.COOL,
         },
         blocking=True,
     )
     state = hass.states.get(entity_id)
     assert state is not None
     assert state.state == HVACMode.COOL
-    assert state.attributes[ATTR_FAN_MODE] == "3"
+    assert state.attributes[ClimateEntityStateAttribute.FAN_MODE] == "3"
 
     await hass.services.async_call(
         CLIMATE_DOMAIN,
         SERVICE_SET_HVAC_MODE,
         {
             "entity_id": entity_id,
-            "hvac_mode": HVACMode.DRY,
+            ClimateServiceArgument.HVAC_MODE: HVACMode.DRY,
         },
         blocking=True,
     )
     state = hass.states.get(entity_id)
     assert state is not None
     assert state.state == HVACMode.DRY
-    assert state.attributes[ATTR_FAN_MODE] == "auto"
+    assert state.attributes[ClimateEntityStateAttribute.FAN_MODE] == "auto"

@@ -15,6 +15,11 @@ class DaikinOnectaDevice:
         self.ha_device_id: str | None = None
 
     @property
+    def present_in_cloud(self) -> bool:
+        """Return whether the latest successful response included this gateway."""
+        return self._is_present_in_cloud
+
+    @property
     def available(self) -> bool:
         """Return whether the device is connected to the Daikin cloud."""
         return self._is_present_in_cloud and self.device.available
@@ -35,9 +40,7 @@ class DaikinOnectaDevice:
         """Mark the device unavailable after it is absent from a cloud response."""
         self._is_present_in_cloud = False
 
-    def _metadata(
-        self,
-    ) -> tuple[str, str | None, str | None, str | None, str | None, str | None]:
+    def _metadata(self) -> tuple[object, ...]:
         """Return the cloud identity and descriptive metadata."""
         model, serial_number, sw_version = self.gateway_metadata
         return (

@@ -1,7 +1,8 @@
 """Config flow for the Daikin platform."""
 
+from collections.abc import Mapping
 import logging
-from typing import cast, override
+from typing import Any, cast, override
 
 from daikin_onecta import (
     OnectaAccessTokenError,
@@ -11,7 +12,7 @@ from daikin_onecta import (
     get_account_id,
 )
 
-from homeassistant.config_entries import ConfigFlowResult
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigFlowResult
 from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -40,8 +41,22 @@ class FlowHandler(
         """Extra data that needs to be appended to the authorize url."""
         return {"scope": " ".join(OAUTH_SCOPES)}
 
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
+        """Perform reauthentication after an authentication error."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Confirm reauthentication and restart OAuth authorization."""
+        if user_input is None:
+            return self.async_show_form(step_id="reauth_confirm")
+        return await self.async_step_user()
+
     @override
-    async def async_oauth_create_entry(self, data: dict) -> ConfigFlowResult:
+    async def async_oauth_create_entry(self, data: dict[str, Any]) -> ConfigFlowResult:
         """Create an OAuth config entry."""
         try:
             unique_id = get_account_id(data["token"]["access_token"])
@@ -49,10 +64,25 @@ class FlowHandler(
             return self.async_abort(reason="invalid_token")
 
         await self.async_set_unique_id(unique_id)
+        access_token = cast("str", data["token"]["access_token"])
+
+        if self.source == SOURCE_REAUTH:
+            self._abort_if_unique_id_mismatch(reason="wrong_account")
+            if reason := await self._async_test_api_access(access_token):
+                return self.async_abort(reason=reason)
+            return self.async_update_reload_and_abort(
+                self._get_reauth_entry(), data=data
+            )
 
         self._abort_if_unique_id_configured()
 
-        access_token = cast("str", data["token"]["access_token"])
+        if reason := await self._async_test_api_access(access_token):
+            return self.async_abort(reason=reason)
+
+        return await super().async_oauth_create_entry(data)
+
+    async def _async_test_api_access(self, access_token: str) -> str | None:
+        """Test the gateway API with the newly authorized token."""
 
         async def async_get_access_token() -> str:
             return access_token
@@ -63,11 +93,10 @@ class FlowHandler(
         try:
             await client.get_gateway_devices()
         except OnectaAuthenticationError:
-            return self.async_abort(reason="invalid_auth")
+            return "invalid_auth"
         except OnectaRequestError:
-            return self.async_abort(reason="cannot_connect")
-
-        return await super().async_oauth_create_entry(data)
+            return "cannot_connect"
+        return None
 
     @property
     @override
