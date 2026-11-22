@@ -10,7 +10,7 @@ from pytest_homeassistant.common import MockConfigEntry, async_fire_time_changed
 from yarl import URL
 
 from homeassistant.components.daikin_onecta.const import DOMAIN
-from homeassistant.config_entries import ConfigEntryState
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import (
@@ -23,7 +23,12 @@ from homeassistant.helpers.config_entry_oauth2_flow import (
 )
 
 from .conftest import MockOnectaClient
-from .test_climate_snapshots import _async_setup_fixture
+from .platform_helpers import _async_setup_fixture
+
+
+def _token_request_info() -> RequestInfo:
+    url = URL("https://idp.onecta.daikineurope.com/v1/oidc/token")
+    return RequestInfo(url=url, method="POST", headers={}, real_url=url)
 
 
 @pytest.mark.parametrize("status", [401, 403])
@@ -33,7 +38,7 @@ async def test_setup_rejected_cloud_token_requires_authentication(
     status: int,
     mock_onecta_client: MockOnectaClient,
 ) -> None:
-    """Classify rejected API tokens as authentication failures, not retries."""
+    """Handle the library's real authentication exception during initial polling."""
     mock_onecta_client.get_gateway_devices.side_effect = OnectaAuthenticationError(
         status=status, method="GET", path="/v1/gateway-devices"
     )
@@ -46,20 +51,36 @@ async def test_setup_rejected_cloud_token_requires_authentication(
         assert not await hass.config_entries.async_setup(config_entry.entry_id)
 
     mock_onecta_client.get_gateway_devices.assert_awaited_once_with()
-
     assert config_entry.state is ConfigEntryState.SETUP_ERROR
-    assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+
+
+def _reauth_error() -> OAuth2TokenRequestReauthError:
+    return OAuth2TokenRequestReauthError(
+        domain=DOMAIN,
+        request_info=_token_request_info(),
+        status=401,
+        message="invalid_grant",
+    )
+
+
+def _token_error() -> OAuth2TokenRequestError:
+    return OAuth2TokenRequestError(
+        domain=DOMAIN,
+        request_info=_token_request_info(),
+        status=500,
+        message="server error",
+    )
 
 
 @pytest.mark.parametrize("status", [401, 403])
-async def test_poll_rejected_cloud_token_stops_polling_without_reauth(
+async def test_poll_rejected_cloud_token_starts_reauthentication(
     hass: HomeAssistant,
     config_entry: MockConfigEntry,
     status: int,
     freezer: FrozenDateTimeFactory,
     mock_onecta_client: MockOnectaClient,
 ) -> None:
-    """Report authentication failure without adding a reauthentication flow."""
+    """A real library authentication failure during polling starts the HA flow."""
     await _async_setup_fixture(hass, config_entry, "minimal_data")
     coordinator = config_entry.runtime_data
     mock_onecta_client.get_gateway_devices.side_effect = OnectaAuthenticationError(
@@ -70,19 +91,11 @@ async def test_poll_rejected_cloud_token_stops_polling_without_reauth(
     async_fire_time_changed(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
 
-    mock_onecta_client.get_gateway_devices.assert_awaited_once_with()
-
-    # An auth failure stops scheduled polling when no reauth flow is supported.
-    freezer.tick(coordinator.update_interval)
-    async_fire_time_changed(hass)
-    await hass.async_block_till_done(wait_background_tasks=True)
-    mock_onecta_client.get_gateway_devices.assert_awaited_once_with()
-
     assert not coordinator.last_update_success
-    assert isinstance(coordinator.last_exception, ConfigEntryAuthFailed)
-    assert coordinator.last_exception.translation_key == "authentication_failed"
-    assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN)
-    assert config_entry.state is ConfigEntryState.LOADED
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert len(flows) == 1
+    assert flows[0]["context"]["source"] == SOURCE_REAUTH
+    assert flows[0]["context"]["entry_id"] == config_entry.entry_id
 
 
 async def test_poll_refresh_token_rejection_marks_climate_unavailable(
@@ -107,31 +120,9 @@ async def test_poll_refresh_token_rejection_marks_climate_unavailable(
     assert hass.states.get(climate_entity_id).state == STATE_UNAVAILABLE
     assert isinstance(coordinator.last_exception, ConfigEntryAuthFailed)
     assert coordinator.last_exception.translation_key == "authentication_failed"
-    assert not hass.config_entries.flow.async_progress_by_handler(DOMAIN)
-    assert config_entry.state is ConfigEntryState.LOADED
-
-
-def _token_request_info() -> RequestInfo:
-    url = URL("https://idp.onecta.daikineurope.com/v1/oidc/token")
-    return RequestInfo(url=url, method="POST", headers={}, real_url=url)
-
-
-def _reauth_error() -> OAuth2TokenRequestReauthError:
-    return OAuth2TokenRequestReauthError(
-        domain=DOMAIN,
-        request_info=_token_request_info(),
-        status=401,
-        message="invalid_grant",
-    )
-
-
-def _token_error() -> OAuth2TokenRequestError:
-    return OAuth2TokenRequestError(
-        domain=DOMAIN,
-        request_info=_token_request_info(),
-        status=500,
-        message="server error",
-    )
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert len(flows) == 1
+    assert flows[0]["context"]["source"] == SOURCE_REAUTH
 
 
 @pytest.mark.asyncio
@@ -176,7 +167,7 @@ async def test_setup_entry_retries_token_timeout(
     config_entry: MockConfigEntry,
     mock_onecta_client: MockOnectaClient,
 ) -> None:
-    """Token validation timeouts retry the first cloud refresh."""
+    """A bare token-refresh timeout retries the first cloud refresh."""
     mock_onecta_client.get_gateway_devices.side_effect = TimeoutError("timeout")
     with (
         patch(
